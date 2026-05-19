@@ -243,9 +243,15 @@ class MoonrakerLaneSyncAdapter:
                     "lane": str(lane_index),
                     "material": material if has_filament else "",
                     "color": self._rgb_to_hex(inv.get("color")) if has_filament else "",
+                    "filament_name": material if has_filament else "",
+                    "filament_id": material if has_filament else "",
                     "scan_time": "",
                     "td": "",
                 }
+
+                custom_name = inv.get("custom_name") or inv.get("filament_settings_id")
+                if custom_name and has_filament:
+                    entry["filament_settings_id"] = custom_name
 
                 nozzle_temp = self._safe_temp(inv.get("temp"))
                 if nozzle_temp is not None:

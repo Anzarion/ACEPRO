@@ -706,7 +706,14 @@ def cmd_ACE_SET_SLOT(gcmd):
             raise gcmd.error(f"Invalid slot {idx}")
 
         if gcmd.get_int("EMPTY", 0):
-            ace.inventory[idx] = {"status": "empty", "color": [0, 0, 0], "material": "", "temp": 0, "rfid": False}
+            ace.inventory[idx] = {
+                "status": "empty",
+                "color": [0, 0, 0],
+                "material": "",
+                "temp": 0,
+                "rfid": False,
+                "custom_name": "",
+            }
             manager = ace_get_manager(ace.instance_num)
             manager._sync_inventory_to_persistent(ace.instance_num)
             gcmd.respond_info(f"Slot {idx} set to empty")
@@ -735,10 +742,20 @@ def cmd_ACE_SET_SLOT(gcmd):
                     f"COLOR must be a named color ({', '.join(COLOR_NAMES.keys())}) or R,G,B format"
                 )
 
-        ace.inventory[idx] = {"status": "ready", "color": color, "material": material, "temp": temp, "rfid": False}
+        custom_name = gcmd.get("FILAMENT_SETTINGS_ID", "")
+        ace.inventory[idx] = {
+            "status": "ready",
+            "color": color,
+            "material": material,
+            "temp": temp,
+            "rfid": False,
+            "custom_name": custom_name,
+        }
         manager = ace_get_manager(ace.instance_num)
         manager._sync_inventory_to_persistent(ace.instance_num)
-        gcmd.respond_info(f"Slot {idx}: color={color}, material={material}, temp={temp}")
+        gcmd.respond_info(
+            f"Slot {idx}: color={color}, material={material}, temp={temp}, custom_name={custom_name}"
+        )
     except Exception as e:
         gcmd.respond_info(f"ACE_SET_SLOT error: {e}")
 
