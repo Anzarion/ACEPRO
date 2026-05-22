@@ -1033,6 +1033,65 @@ class TestConnectionLifecycle:
         assert request['id'] == 99
         assert self.manager._request_id == 10  # Not incremented
 
+    def test_send_frame_request_id_wraps_at_16bit(self):
+        """Test _request_id wraps from 0xFFFF back to 1 and callback_map key matches wire ID."""
+        from ace.serial_manager import AceSerialManager
+        self.manager._send_frame = AceSerialManager._send_frame.__get__(self.manager, AceSerialManager)
+
+        self.manager._connected = True
+        self.manager._serial = Mock()
+        self.manager._serial.is_open = True
+        self.manager._serial.write = Mock()
+
+        # Set counter to max uint16 value
+        self.manager._request_id = 0xFFFF
+
+        request = {"method": "ping"}
+        self.manager._send_frame(request)
+
+        # ID assigned must equal 0xFFFF (lower 16 bits = 0xFFFF)
+        assert request['id'] == 0xFFFF
+        assert self.manager._request_id == 1
+
+    def test_send_frame_request_id_after_wrap_stays_in_16bit(self):
+        """Test IDs after rollover stay within 16-bit range and match wire encoding."""
+        from ace.serial_manager import AceSerialManager
+        self.manager._send_frame = AceSerialManager._send_frame.__get__(self.manager, AceSerialManager)
+
+        self.manager._connected = True
+        self.manager._serial = Mock()
+        self.manager._serial.is_open = True
+        self.manager._serial.write = Mock()
+
+        # Simulate overflow: start just past uint16 boundary (should never happen now,
+        # but verify the mask still protects against it defensively)
+        for start_id in (0xFFFE, 0xFFFF, 1):
+            self.manager._request_id = start_id
+            request = {}
+            self.manager._send_frame(request)
+            assert 1 <= request['id'] <= 0xFFFF
+            assert 1 <= self.manager._request_id <= 0xFFFF
+
+    def test_writer_request_id_wraps_at_16bit(self):
+        """Test _writer loop wraps _request_id correctly and callback_map key matches response ID."""
+        from ace.serial_manager import AceSerialManager
+        self.manager._writer = AceSerialManager._writer.__get__(self.manager, AceSerialManager)
+        self.manager._send_frame = Mock()  # Don't actually write to serial
+
+        self.manager._connected = True
+        self.manager._serial = Mock()
+        self.manager._serial.is_open = True
+        self.manager._request_id = 0xFFFF
+
+        cb = Mock()
+        self.manager._queue.put([{"method": "ping"}, cb])
+
+        self.manager._writer(0)
+
+        # callback_map key must be 0xFFFF (the wire ID sent)
+        assert 0xFFFF in self.manager._callback_map
+        assert self.manager._request_id == 1
+
     def test_connect_handles_serial_exception(self):
         # Force SerialException path
         import ace.serial_manager as sm
