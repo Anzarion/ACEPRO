@@ -310,10 +310,13 @@ class FilamentTracker:
     def _note_filament_present(self, present_int, eventtime=None):
         """Update filament presence, firing the callback on transitions.
 
-        When motion detection is active, only *absence* is forwarded to
-        RunoutHelper (immediate runout on physical removal).  Presence
-        is signalled by encoder pulses instead, which confirm the
-        filament is actually moving.
+        In switch mode (``detect_pin_is_switch``), the switch pin is the
+        sole authority — both presence and absence are forwarded to
+        RunoutHelper immediately, regardless of motion detection.
+
+        In dual-encoder mode with motion detection, only *absence* is
+        forwarded (presence comes from encoder pulses confirming the
+        filament is actually moving).
 
         Args:
             present_int: 1 if filament detected, 0 if absent.
@@ -325,8 +328,12 @@ class FilamentTracker:
         self._trace(present_int)
         if eventtime is None:
             eventtime = self.reactor.monotonic()
-        if self._motion_detection_enabled:
-            # Only forward absence — presence comes from encoder pulses.
+        if self._detect_pin_is_switch:
+            # Switch mode: switch pin is authoritative for all presence
+            self.runout_helper.note_filament_present(
+                eventtime, bool(present_int))
+        elif self._motion_detection_enabled:
+            # Dual-encoder: only forward absence — presence via encoder
             if not present_int:
                 self.runout_helper.note_filament_present(eventtime, False)
         else:
@@ -342,12 +349,18 @@ class FilamentTracker:
         from the new pulse count and, when motion detection is active,
         resets the runout window and tells RunoutHelper that filament is
         present (encoder activity = filament is moving).
+
+        In switch mode (``detect_pin_is_switch``), encoder pulses do NOT
+        update presence — the switch pin is the sole authority.  This
+        prevents false positives when the encoder rests on a tooth at
+        startup or after filament retraction.
         """
         self.tracker_status.filament_distance = (
             self.tracker_status.encoder_pulse * self.length_per_pulse)
         if self._motion_detection_enabled and self._extruder is not None:
             self._update_filament_runout_pos(eventtime)
-            self.runout_helper.note_filament_present(eventtime, True)
+            if not self._detect_pin_is_switch:
+                self.runout_helper.note_filament_present(eventtime, True)
 
     def _trace_enabled(self, present_int):
         """Log a filament presence transition (only bound when debug_trace is on)."""
@@ -533,10 +546,23 @@ class FilamentTracker:
 
         If the extruder has moved past ``filament_runout_pos`` without
         any encoder activity, signal a clog to RunoutHelper.
+
+        In switch mode (``detect_pin_is_switch``), the switch pin is
+        the sole authority for presence.  This timer only signals
+        absence (clog detection) but never overrides the switch with
+        a spurious "present" based on extruder position alone.
         """
         extruder_pos = self._get_extruder_pos(eventtime)
-        self.runout_helper.note_filament_present(
-            eventtime, extruder_pos < self._filament_runout_pos)
+        is_within_window = extruder_pos < self._filament_runout_pos
+        if self._detect_pin_is_switch:
+            # Switch mode: the switch pin is the sole authority for
+            # presence AND absence.  The extruder-position timer must
+            # not touch RunoutHelper at all, otherwise it desyncs from
+            # the switch state (tracker_status vs runout_helper).
+            pass
+        else:
+            self.runout_helper.note_filament_present(
+                eventtime, is_within_window)
         return eventtime + CHECK_RUNOUT_TIMEOUT
 
 def load_config_filament_tracker(config):
