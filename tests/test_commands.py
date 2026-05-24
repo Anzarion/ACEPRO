@@ -759,7 +759,7 @@ class TestCommandSmoke:
         """Test ACE_SET_SLOT with material info."""
         mock_gcmd.get_command_parameters = Mock(return_value={"INSTANCE": 0, "INDEX": 0})
         mock_gcmd.get_int = Mock(side_effect=[0, 0, 0, 210])
-        mock_gcmd.get = Mock(side_effect=["255,0,0", "PLA"])
+        mock_gcmd.get = Mock(side_effect=["255,0,0", "PLA", ""])
         
         ace.commands.cmd_ACE_SET_SLOT(mock_gcmd)
         assert mock_gcmd.respond_info.called
@@ -768,7 +768,7 @@ class TestCommandSmoke:
         """Test ACE_SET_SLOT with named color RED."""
         mock_gcmd.get_command_parameters = Mock(return_value={"INSTANCE": 0, "INDEX": 0})
         mock_gcmd.get_int = Mock(side_effect=[0, 0, 0, 210])
-        mock_gcmd.get = Mock(side_effect=["RED", "PLA"])
+        mock_gcmd.get = Mock(side_effect=["RED", "PLA", ""])
         
         ace.commands.cmd_ACE_SET_SLOT(mock_gcmd)
         assert mock_gcmd.respond_info.called
@@ -779,7 +779,7 @@ class TestCommandSmoke:
         """Test ACE_SET_SLOT with named color BLUE."""
         mock_gcmd.get_command_parameters = Mock(return_value={"INSTANCE": 0, "INDEX": 1})
         mock_gcmd.get_int = Mock(side_effect=[0, 1, 0, 240])
-        mock_gcmd.get = Mock(side_effect=["BLUE", "PETG"])
+        mock_gcmd.get = Mock(side_effect=["BLUE", "PETG", ""])
         
         ace.commands.cmd_ACE_SET_SLOT(mock_gcmd)
         assert mock_gcmd.respond_info.called
@@ -790,7 +790,7 @@ class TestCommandSmoke:
         """Test ACE_SET_SLOT with lowercase named color."""
         mock_gcmd.get_command_parameters = Mock(return_value={"INSTANCE": 0, "INDEX": 0})
         mock_gcmd.get_int = Mock(side_effect=[0, 0, 0, 200])
-        mock_gcmd.get = Mock(side_effect=["green", "PLA"])
+        mock_gcmd.get = Mock(side_effect=["green", "PLA", ""])
         
         ace.commands.cmd_ACE_SET_SLOT(mock_gcmd)
         assert mock_gcmd.respond_info.called
@@ -801,7 +801,7 @@ class TestCommandSmoke:
         """Test ACE_SET_SLOT with named color ORANGE."""
         mock_gcmd.get_command_parameters = Mock(return_value={"INSTANCE": 0, "INDEX": 2})
         mock_gcmd.get_int = Mock(side_effect=[0, 2, 0, 220])
-        mock_gcmd.get = Mock(side_effect=["ORANGE", "ABS"])
+        mock_gcmd.get = Mock(side_effect=["ORANGE", "ABS", ""])
         
         ace.commands.cmd_ACE_SET_SLOT(mock_gcmd)
         assert mock_gcmd.respond_info.called
@@ -812,7 +812,7 @@ class TestCommandSmoke:
         """Test ACE_SET_SLOT with named color ORCA."""
         mock_gcmd.get_command_parameters = Mock(return_value={"INSTANCE": 0, "INDEX": 3})
         mock_gcmd.get_int = Mock(side_effect=[0, 3, 0, 230])
-        mock_gcmd.get = Mock(side_effect=["ORCA", "PETG"])
+        mock_gcmd.get = Mock(side_effect=["ORCA", "PETG", ""])
         
         ace.commands.cmd_ACE_SET_SLOT(mock_gcmd)
         assert mock_gcmd.respond_info.called
@@ -823,7 +823,7 @@ class TestCommandSmoke:
         """Test ACE_SET_SLOT still accepts R,G,B format."""
         mock_gcmd.get_command_parameters = Mock(return_value={"INSTANCE": 0, "INDEX": 0})
         mock_gcmd.get_int = Mock(side_effect=[0, 0, 0, 215])
-        mock_gcmd.get = Mock(side_effect=["128,64,192", "TPU"])
+        mock_gcmd.get = Mock(side_effect=["128,64,192", "TPU", ""])
         
         ace.commands.cmd_ACE_SET_SLOT(mock_gcmd)
         assert mock_gcmd.respond_info.called
@@ -835,7 +835,7 @@ class TestCommandSmoke:
         mock_gcmd.get_command_parameters = Mock(return_value={"INSTANCE": 0, "INDEX": 0})
         mock_gcmd.get_int = Mock(side_effect=[0, 0, 0, 210])
         # "PURPLE" is not a valid named color and will fail R,G,B parsing too
-        mock_gcmd.get = Mock(side_effect=["PURPLE", "PLA"])
+        mock_gcmd.get = Mock(side_effect=["PURPLE", "PLA", ""])
         
         # Mock error to raise exception (will be caught and converted to respond_info)
         def error_func(msg):
@@ -855,7 +855,7 @@ class TestCommandSmoke:
         """Test ACE_SET_SLOT clamps out-of-range RGB values to 0-255."""
         mock_gcmd.get_command_parameters = Mock(return_value={"INSTANCE": 0, "INDEX": 0})
         mock_gcmd.get_int = Mock(side_effect=[0, 0, 0, 210])
-        mock_gcmd.get = Mock(side_effect=["500,0,-10", "PLA"])  # Invalid values
+        mock_gcmd.get = Mock(side_effect=["500,0,-10", "PLA", ""])  # Invalid values
         
         ace.commands.cmd_ACE_SET_SLOT(mock_gcmd)
         
@@ -866,7 +866,7 @@ class TestCommandSmoke:
         """Test ACE_SET_SLOT RGB parsing handles whitespace."""
         mock_gcmd.get_command_parameters = Mock(return_value={"INSTANCE": 0, "INDEX": 0})
         mock_gcmd.get_int = Mock(side_effect=[0, 0, 0, 210])
-        mock_gcmd.get = Mock(side_effect=["128, 64, 192", "PLA"])  # Spaces in RGB
+        mock_gcmd.get = Mock(side_effect=["128, 64, 192", "PLA", ""])  # Spaces in RGB
         
         # Current behavior: spaces may cause parsing failure
         ace.commands.cmd_ACE_SET_SLOT(mock_gcmd)
@@ -878,7 +878,7 @@ class TestCommandSmoke:
         """Test ACE_SET_SLOT rejects RGB with wrong number of values."""
         mock_gcmd.get_command_parameters = Mock(return_value={"INSTANCE": 0, "INDEX": 0})
         mock_gcmd.get_int = Mock(side_effect=[0, 0, 0, 210])
-        mock_gcmd.get = Mock(side_effect=["128,64", "PLA"])  # Only 2 values
+        mock_gcmd.get = Mock(side_effect=["128,64", "PLA", ""])  # Only 2 values
         
         def error_func(msg):
             raise Exception(msg)
