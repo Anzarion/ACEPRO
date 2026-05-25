@@ -860,6 +860,10 @@ class AceManager:
 
         self.gcode.respond_info(f"ACE: Smart unload tool {tool_index} (current: {current_tool_index})")
 
+        # Move to throw/bucket position before any retraction so ooze
+        # drips into the bucket instead of onto the print bed.
+        self.gcode.run_script_from_command("TO_THROW_POSITION")
+
         tool_for_temp = tool_index if tool_index >= 0 else current_tool_index
 
         retract_length = self.toolhead_retraction_length
@@ -923,6 +927,7 @@ class AceManager:
                     self.state.set("ace_filament_pos", FILAMENT_STATE_BOWDEN)
                     self.gcode.respond_info(f"ACE: Tool {tool_index} unloaded successfully")
                     if not keep_heater:
+                        self.gcode.run_script_from_command("NOZZLE_CLEAN")
                         self._turn_off_heater_if_idle()
                     return True
                 else:
@@ -967,6 +972,7 @@ class AceManager:
                     self.state.set("ace_filament_pos", FILAMENT_STATE_BOWDEN)
                     self.gcode.respond_info(f"ACE: Tool {tool_index} unloaded successfully")
                     if not keep_heater:
+                        self.gcode.run_script_from_command("NOZZLE_CLEAN")
                         self._turn_off_heater_if_idle()
                     return True
                 else:
