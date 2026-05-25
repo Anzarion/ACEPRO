@@ -928,6 +928,7 @@ class AceManager:
                     self.gcode.respond_info(f"ACE: Tool {tool_index} unloaded successfully")
                     if not keep_heater:
                         self.gcode.run_script_from_command("NOZZLE_CLEAN")
+                        self.gcode.run_script_from_command("TO_THROW_POSITION")
                         self._turn_off_heater_if_idle()
                     return True
                 else:
@@ -973,6 +974,7 @@ class AceManager:
                     self.gcode.respond_info(f"ACE: Tool {tool_index} unloaded successfully")
                     if not keep_heater:
                         self.gcode.run_script_from_command("NOZZLE_CLEAN")
+                        self.gcode.run_script_from_command("TO_THROW_POSITION")
                         self._turn_off_heater_if_idle()
                     return True
                 else:
