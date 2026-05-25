@@ -861,9 +861,6 @@ class AceManager:
         self.gcode.respond_info(f"ACE: Smart unload tool {tool_index} (current: {current_tool_index})")
 
         tool_for_temp = tool_index if tool_index >= 0 else current_tool_index
-        if prepare_toolhead:
-            self.gcode.respond_info("ACE: Preparing toolhead")
-            self.prepare_toolhead_for_filament_retraction(tool_index=tool_for_temp)
 
         retract_length = self.toolhead_retraction_length
         retract_speed = self.toolhead_retraction_speed
@@ -883,6 +880,19 @@ class AceManager:
                 raise Exception(
                     f"Cannot unload T{tool_index} - ACE slot {local_slot} is EMPTY.\n"
                 )
+
+            # Disable feed assist BEFORE prepare_toolhead/CUT_TIP — feed assist
+            # pushes filament forward and would fight the pre-cut retract and
+            # the cutter blade during CUT_TIP.
+            if instance._feed_assist_index == local_slot:
+                self.gcode.respond_info(
+                    f"ACE: Disabling feed assist on slot {local_slot} before cut/retract"
+                )
+                instance._disable_feed_assist(local_slot)
+
+            if prepare_toolhead:
+                self.gcode.respond_info("ACE: Preparing toolhead")
+                self.prepare_toolhead_for_filament_retraction(tool_index=tool_for_temp)
 
             # Sensor already clear - choose retract distance based on path state
             if not self.get_instant_switch_state(SENSOR_TOOLHEAD):
@@ -928,15 +938,6 @@ class AceManager:
                 parkposition_to_toolhead_length = self._get_config_for_tool(
                     tool_index, "parkposition_to_toolhead_length"
                 )
-
-                # Disable feed assist BEFORE any motion — feed assist pushes
-                # filament forward and would fight both the extruder retract
-                # and the ACE retract that follow.
-                if instance._feed_assist_index == local_slot:
-                    self.gcode.respond_info(
-                        f"ACE: Disabling feed assist on slot {local_slot} before coordinated retract"
-                    )
-                    instance._disable_feed_assist(local_slot)
 
                 self.gcode.respond_info(
                     f"ACE: Retracting T{tool_index} "
