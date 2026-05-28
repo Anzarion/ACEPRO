@@ -392,13 +392,53 @@ EOF
 
     VP_SOURCE="$SCRIPT_DIR/extras/virtual_pins.py"
     VP_TARGET="$KLIPPER_DIR/klippy/extras/virtual_pins.py"
-    
+
     if [ ! -f "$VP_SOURCE" ]; then
         print_error "virtual_pins.py not found: $ACE_SOURCE"
         exit 1
     fi
-    
+
     create_or_replace_symlink "$VP_SOURCE" "$VP_TARGET" "virtual_pins module"
+
+    # filament_tracker.py — ships from this repo (originally from the Kobra-S1
+    # Klipper fork).  Detect a pre-existing copy in klippy/extras: if it is
+    # identical, convert it silently to a symlink; if it differs, warn the user
+    # (likely the Kobra-S1 fork installed it) and ask before replacing.
+    FT_SOURCE="$SCRIPT_DIR/extras/filament_tracker.py"
+    FT_TARGET="$KLIPPER_DIR/klippy/extras/filament_tracker.py"
+
+    if [ ! -f "$FT_SOURCE" ]; then
+        print_error "filament_tracker.py not found: $FT_SOURCE"
+        exit 1
+    fi
+
+    if [ -e "$FT_TARGET" ] && ! is_symlink "$FT_TARGET"; then
+        # Existing regular file (most likely shipped by the Kobra-S1 Klipper fork)
+        if diff -q "$FT_SOURCE" "$FT_TARGET" >/dev/null 2>&1; then
+            print_info "filament_tracker.py already present in klippy/extras and identical — converting to symlink"
+            rm -f "$FT_TARGET"
+            ln -sf "$FT_SOURCE" "$FT_TARGET"
+            print_success "Symlink created: $FT_TARGET → $FT_SOURCE"
+        else
+            print_warning "filament_tracker.py already exists in klippy/extras and DIFFERS from this repo's version (Kobra-S1 fork?)."
+            print_info "  Existing: $FT_TARGET"
+            print_info "  Ours:     $FT_SOURCE"
+            if prompt_yes_no "Backup the existing file and replace with our symlink?"; then
+                local timestamp=$(date +"%Y%m%d_%H%M%S")
+                local ft_backup="${FT_TARGET}.backup_${timestamp}"
+                cp "$FT_TARGET" "$ft_backup"
+                print_success "Backed up: $FT_TARGET → $ft_backup"
+                rm -f "$FT_TARGET"
+                ln -sf "$FT_SOURCE" "$FT_TARGET"
+                print_success "Symlink created: $FT_TARGET → $FT_SOURCE"
+            else
+                print_warning "Kept existing filament_tracker.py — running with that version"
+            fi
+        fi
+    else
+        # Either missing or already a symlink — use the standard helper
+        create_or_replace_symlink "$FT_SOURCE" "$FT_TARGET" "filament_tracker module"
+    fi
 
     # Optional ACE temperature sensor (safe to link even if unused)
     TEMP_SOURCE="$SCRIPT_DIR/extras/temperature_ace.py"
