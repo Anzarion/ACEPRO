@@ -199,6 +199,11 @@ def read_ace_config(config):
     ace_config["tangle_detection"] = config.getboolean(
         "tangle_detection", False
     )
+    # Detection algorithm: "simple" = legacy point-to-point check (default).
+    # Future modes (e.g. "windowed") plug into the same dispatcher.
+    ace_config["tangle_detection_mode"] = config.get(
+        "tangle_detection_mode", "simple"
+    )
     ace_config["tangle_detection_length"] = config.getfloat(
         "tangle_detection_length", 15.0
     )

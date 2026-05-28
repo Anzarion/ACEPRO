@@ -49,9 +49,16 @@ class RunoutMonitor:
     # Klipper filament_motion_sensor cadence.
     TANGLE_CHECK_INTERVAL = 0.250
 
+    # Valid tangle detection algorithms.  "simple" = legacy point-to-point
+    # check (extruder moved >= length while encoder pulse count unchanged).
+    # Additional modes plug into the _check_tangle dispatcher.
+    VALID_TANGLE_MODES = ("simple",)
+    DEFAULT_TANGLE_MODE = "simple"
+
     def __init__(self, printer, gcode, reactor, endless_spool, manager,
                  runout_debounce_count=1, tangle_detection=False,
-                 tangle_detection_length=None):
+                 tangle_detection_length=None,
+                 tangle_detection_mode=None):
         """
         Initialize runout monitor.
 
@@ -70,6 +77,9 @@ class RunoutMonitor:
             tangle_detection_length: Distance in mm the extruder must
                 move without encoder activity before a tangle is declared.
                 Defaults to DEFAULT_TANGLE_DETECTION_LENGTH (15.0 mm).
+            tangle_detection_mode: Algorithm to use ("simple" only at
+                this point).  Unknown values fall back to "simple" with
+                a warning.  Defaults to DEFAULT_TANGLE_MODE.
         """
         self.printer = printer
         self.gcode = gcode
@@ -100,6 +110,20 @@ class RunoutMonitor:
             tangle_detection_length if tangle_detection_length is not None
             else self.DEFAULT_TANGLE_DETECTION_LENGTH
         )
+        # Validate the algorithm name; unknown values fall back to simple.
+        requested_mode = (
+            tangle_detection_mode if tangle_detection_mode is not None
+            else self.DEFAULT_TANGLE_MODE
+        )
+        if requested_mode not in self.VALID_TANGLE_MODES:
+            logging.warning(
+                "ACE: Unknown tangle_detection_mode %r — falling back to %r "
+                "(valid: %s)",
+                requested_mode, self.DEFAULT_TANGLE_MODE,
+                ", ".join(self.VALID_TANGLE_MODES),
+            )
+            requested_mode = self.DEFAULT_TANGLE_MODE
+        self.tangle_detection_mode = requested_mode
         # Extruder position beyond which a tangle is declared
         self._tangle_runout_pos = None
         # Encoder pulse snapshot at the time the window was set
@@ -431,7 +455,19 @@ class RunoutMonitor:
         self._tangle_encoder_snapshot = encoder_pulse
 
     def _check_tangle(self, eventtime, current_tool):
-        """Check for spool tangle condition.
+        """Dispatch to the configured tangle detection algorithm.
+
+        Currently only ``simple`` is wired up; additional modes (e.g. a
+        windowed/ratio-based detector) plug in here.
+        """
+        if self.tangle_detection_mode == "simple":
+            return self._check_tangle_simple(eventtime, current_tool)
+        # __init__ already validates the mode; defensively fall back here
+        # so an unexpected value never silently turns detection off.
+        return self._check_tangle_simple(eventtime, current_tool)
+
+    def _check_tangle_simple(self, eventtime, current_tool):
+        """Legacy point-to-point tangle check (``tangle_detection_mode="simple"``).
 
         Tangle is declared when ALL of the following are true:
             1. Print state is "printing" (already guaranteed by caller)
