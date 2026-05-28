@@ -583,3 +583,212 @@ class TestExtruderResolution:
         assert result is True
         # lookup_object should NOT have been called
         self.printer.lookup_object.assert_not_called()
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Windowed-mode tests
+# ─────────────────────────────────────────────────────────────────────────
+
+def _make_windowed_monitor(
+    window_duration=5.0,
+    window_min_extrude=20.0,
+    confirmation_count=3,
+    pulses_per_mm=0.0,
+    debug=False,
+):
+    """Build a RunoutMonitor pre-configured for windowed tangle detection.
+
+    The extruder and timer mocks are pre-resolved so ``_resolve_extruder``
+    short-circuits and tests can drive ``_get_extruder_pos`` directly.
+    """
+    printer = Mock()
+    gcode = Mock()
+    reactor = Mock()
+    reactor.NOW = 0.0
+    endless_spool = Mock()
+    manager = Mock()
+    manager.toolchange_in_progress = False
+    manager.state = Mock()
+    manager.state.get = Mock(return_value=-1)
+
+    monitor = RunoutMonitor(
+        printer, gcode, reactor, endless_spool, manager,
+        runout_debounce_count=1,
+        tangle_detection=True,
+        tangle_detection_mode="windowed",
+        tangle_window_duration=window_duration,
+        tangle_window_min_extrude=window_min_extrude,
+        tangle_confirmation_count=confirmation_count,
+        tangle_pulses_per_mm=pulses_per_mm,
+        tangle_debug=debug,
+    )
+
+    # Pre-resolve so _resolve_extruder returns True without lookup_object.
+    monitor._extruder = Mock()
+    monitor._estimated_print_time = Mock(return_value=0.0)
+
+    return monitor, manager
+
+
+class TestTangleDetectionWindowed:
+    """Tests for the windowed tangle detection algorithm (binary mode).
+
+    The ratio mode (``tangle_pulses_per_mm > 0``) is wired in but
+    intentionally not exercised by automated tests yet — it requires
+    hardware calibration and live testing before we trust thresholds.
+    """
+
+    def setup_method(self):
+        self.monitor, self.manager = _make_windowed_monitor()
+        # Spy on the pause/prompt hand-off so detection can be verified
+        # without cascading into the Mainsail prompt logic.
+        self.monitor._handle_tangle_detected = Mock()
+
+    def _step(self, eventtime, extruder_pos, encoder_pulse,
+              rdm=True, toolhead=True, feed_assist=True):
+        """Drive a single _check_tangle_windowed tick with controlled values."""
+        self.monitor._get_extruder_pos = Mock(return_value=extruder_pos)
+        self.manager.get_rdm_encoder_pulse.return_value = encoder_pulse
+        self.manager.is_feed_assist_active.return_value = feed_assist
+
+        def get_switch(name):
+            if name == SENSOR_RDM:
+                return rdm
+            if name == SENSOR_TOOLHEAD:
+                return toolhead
+            return False
+        self.manager.get_switch_state.side_effect = get_switch
+
+        self.monitor._check_tangle_windowed(eventtime, current_tool=0)
+
+    # ── Pre-condition / reset tests ──────────────────────────────────────
+
+    def test_feed_assist_drop_clears_state(self):
+        """When feed-assist drops, the sample buffer and counter must
+        be cleared so the next active period starts fresh."""
+        for i in range(5):
+            self._step(i * 0.25, extruder_pos=i * 5.0, encoder_pulse=100)
+        assert len(self.monitor._tangle_samples) > 0
+
+        self._step(1.5, extruder_pos=30.0, encoder_pulse=100,
+                   feed_assist=False)
+
+        assert len(self.monitor._tangle_samples) == 0
+        assert self.monitor._tangle_consecutive_suspicious == 0
+        assert self.monitor._tangle_last_extruder_pos is None
+        assert self.monitor._tangle_forward_distance == 0.0
+
+    def test_rdm_sensor_drop_clears_state(self):
+        """RDM clear (filament absent) clears the windowed state."""
+        for i in range(5):
+            self._step(i * 0.25, extruder_pos=i * 5.0, encoder_pulse=100)
+        assert len(self.monitor._tangle_samples) > 0
+
+        self._step(1.5, extruder_pos=30.0, encoder_pulse=100, rdm=False)
+
+        assert len(self.monitor._tangle_samples) == 0
+        self.monitor._handle_tangle_detected.assert_not_called()
+
+    def test_toolhead_sensor_drop_clears_state(self):
+        """Toolhead clear clears the windowed state."""
+        for i in range(5):
+            self._step(i * 0.25, extruder_pos=i * 5.0, encoder_pulse=100)
+
+        self._step(1.5, extruder_pos=30.0, encoder_pulse=100, toolhead=False)
+
+        assert len(self.monitor._tangle_samples) == 0
+        self.monitor._handle_tangle_detected.assert_not_called()
+
+    def test_no_filament_tracker_returns_early(self):
+        """When the RDM is not a filament_tracker (encoder=None), the
+        detector does nothing — no detection, no state changes."""
+        self.manager.get_rdm_encoder_pulse.return_value = None
+        self.manager.is_feed_assist_active.return_value = True
+        self.manager.get_switch_state.side_effect = lambda name: True
+
+        self.monitor._check_tangle_windowed(0.0, current_tool=0)
+
+        assert len(self.monitor._tangle_samples) == 0
+        self.monitor._handle_tangle_detected.assert_not_called()
+
+    # ── Happy path ───────────────────────────────────────────────────────
+
+    def test_happy_path_encoder_advances_no_tangle(self):
+        """Encoder advances proportionally with extruder over a full window
+        — no tangle should be declared."""
+        for i in range(24):  # 6 seconds at 250 ms cadence
+            self._step(i * 0.25,
+                       extruder_pos=i * 5.0,
+                       encoder_pulse=100 + i * 10)
+
+        self.monitor._handle_tangle_detected.assert_not_called()
+        assert self.monitor._tangle_consecutive_suspicious == 0
+
+    # ── Positive detection ───────────────────────────────────────────────
+
+    def test_binary_tangle_after_confirmation_count(self):
+        """Encoder static while extruder moves — tangle declared after
+        tangle_confirmation_count consecutive suspicious windows."""
+        for i in range(30):  # generous upper bound
+            self._step(i * 0.25,
+                       extruder_pos=i * 5.0,
+                       encoder_pulse=100)  # static throughout
+            if self.monitor._handle_tangle_detected.called:
+                break
+
+        self.monitor._handle_tangle_detected.assert_called_once_with(0)
+        # State must be reset on detection so we do not immediately re-fire.
+        assert len(self.monitor._tangle_samples) == 0
+        assert self.monitor._tangle_consecutive_suspicious == 0
+
+    # ── Forward-only accounting ──────────────────────────────────────────
+
+    def test_forward_only_extrusion_ignores_retracts(self):
+        """Negative extruder deltas must not subtract from forward_distance —
+        a retract followed by more forward motion preserves cumulative
+        forward travel."""
+        # 0 -> 10 -> 20 -> 10 -> 5 -> 15 -> 25
+        # forward deltas: 10, 10, 0, 0, 10, 10 = 40 mm
+        positions = [0.0, 10.0, 20.0, 10.0, 5.0, 15.0, 25.0]
+        for i, pos in enumerate(positions):
+            self._step(i * 0.25, extruder_pos=pos, encoder_pulse=100)
+
+        assert self.monitor._tangle_forward_distance == pytest.approx(40.0)
+
+    # ── Window not full / min-extrude gates ──────────────────────────────
+
+    def test_window_not_full_no_detection(self):
+        """Until the deque actually spans the configured window, no
+        judgment is made even when the encoder is static."""
+        for i in range(5):  # 1.25 s < 5 s window
+            self._step(i * 0.25,
+                       extruder_pos=i * 50.0,  # lots of extrusion
+                       encoder_pulse=100)
+
+        self.monitor._handle_tangle_detected.assert_not_called()
+        assert self.monitor._tangle_consecutive_suspicious == 0
+
+    def test_min_extrude_not_met_keeps_counter_zero(self):
+        """Window full but cumulative extrusion < min_extrude — the window
+        is inconclusive (not suspicious) and the counter stays at zero."""
+        # 0.25 mm per tick × 24 ticks = 6 mm < min_extrude (20 mm).
+        for i in range(24):
+            self._step(i * 0.25,
+                       extruder_pos=i * 0.25,
+                       encoder_pulse=100)  # static, would otherwise be suspicious
+
+        self.monitor._handle_tangle_detected.assert_not_called()
+        assert self.monitor._tangle_consecutive_suspicious == 0
+
+    # ── Dispatcher routing ───────────────────────────────────────────────
+
+    def test_check_tangle_dispatches_to_windowed_when_mode_is_windowed(self):
+        """The dispatcher must route to _check_tangle_windowed when the
+        configured mode is "windowed"."""
+        self.monitor._check_tangle_windowed = Mock()
+        self.monitor._check_tangle_simple = Mock()
+
+        self.monitor._check_tangle(eventtime=1.0, current_tool=0)
+
+        self.monitor._check_tangle_windowed.assert_called_once_with(1.0, 0)
+        self.monitor._check_tangle_simple.assert_not_called()
