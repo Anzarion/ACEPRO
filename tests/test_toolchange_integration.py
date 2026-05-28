@@ -171,6 +171,13 @@ class TestToolChangeIntegration(unittest.TestCase):
         elif name == 'extruder':
             mock_extruder = Mock()
             mock_extruder.get_status = Mock(return_value={'temperature': 210})
+            # perform_tool_change checks extruder temperature before loading via
+            # get_heater().get_temp()[0] and min_extrude_temp. Provide a hot
+            # nozzle so the cold-nozzle guard passes through.
+            mock_heater = Mock()
+            mock_heater.get_temp = Mock(return_value=(210.0, 210.0))
+            mock_heater.min_extrude_temp = 170.0
+            mock_extruder.get_heater = Mock(return_value=mock_heater)
             return mock_extruder
         elif name == 'print_stats':
             mock_print_stats = Mock()
@@ -252,7 +259,7 @@ class TestToolChangeIntegration(unittest.TestCase):
                 instance._smart_unload_slot.return_value = True
             
             # Mock smart_unload to properly update filament_pos and clear sensors
-            def mock_smart_unload(tool_index=-1, prepare_toolhead=True):
+            def mock_smart_unload(tool_index=-1, prepare_toolhead=True, keep_heater=False):
                 # Update filament_pos to splitter
                 from ace.config import FILAMENT_STATE_SPLITTER
                 manager.state.set_and_save("ace_filament_pos", FILAMENT_STATE_SPLITTER)

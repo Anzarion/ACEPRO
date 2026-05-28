@@ -743,6 +743,54 @@ class AceManager:
             self.gcode.respond_info(f"ACE: Error preparing toolhead for retraction: {e}")
             return False
 
+    def _ensure_hot_for_recovery_unload(self, current_tool, target_temp):
+        """Heat the extruder before a plausibility-mismatch recovery unload.
+
+        The plausibility-mismatch unloads in :meth:`perform_tool_change` run
+        *before* the PRE macro has heated the nozzle.  When the toolhead sensor
+        is triggered, :meth:`smart_unload` drives extruder moves (pre-cut
+        retract, coordinated retract) which Klipper rejects with
+        "Extrude below minimum temp" on a cold nozzle.
+
+        Picks the best available temperature — the stuck tool's material temp,
+        then the incoming target temp, then ``min_extrude_temp`` as a last
+        resort — and waits for it via ``M109`` when the nozzle is too cold.
+        Independent of whether an RDM sensor is present.
+
+        Args:
+            current_tool: Tool currently recorded as loaded (-1 if unknown).
+            target_temp:  Target tool temperature already resolved by the caller
+                          (0 when unavailable, e.g. unload-only changes).
+        """
+        extruder = self.printer.lookup_object("extruder", None)
+        if extruder is None:
+            return
+        heater = extruder.get_heater()
+        cur_temp = heater.get_temp(self.reactor.monotonic())[0]
+        min_temp = heater.min_extrude_temp
+        if cur_temp >= min_temp:
+            return  # already hot enough to move the extruder
+
+        # The filament physically stuck in the path belongs to the current
+        # tool, so prefer its material temperature.
+        heat_temp = 0
+        if current_tool >= 0:
+            cur_ace, cur_slot = get_ace_instance_and_slot_for_tool(current_tool)
+            if cur_ace is not None:
+                heat_temp = cur_ace.inventory[cur_slot].get("temp", 0) or 0
+        if heat_temp <= 0:
+            heat_temp = target_temp
+        if heat_temp <= 0:
+            # Last resort: clear Klipper's cold-extrude guard so recovery can
+            # proceed at all — better than crashing the whole toolchange.
+            heat_temp = min_temp
+
+        self.gcode.respond_info(
+            f"ACE: Extruder too cold ({cur_temp:.0f}°C < {min_temp:.0f}°C) for "
+            f"recovery unload — heating to {heat_temp:.0f}°C before clearing path"
+        )
+        self.gcode.run_script_from_command(f"M109 S{heat_temp:.0f}")
+
     def execute_coordinated_retraction(self, retract_length, retract_speed, retract_speed_mmmin, current_tool):
         """
         Perform coordinated retraction of ACE and extruder.
@@ -912,16 +960,38 @@ class AceManager:
                         f"(filament may have been manually removed) - "
                         f"short safety retract of {retract_dist}mm"
                     )
+                    instance._smart_unload_slot(local_slot, length=retract_dist)
                 else:
-                    # Toolhead clear but RDM still triggered: full retract needed.
+                    # Toolhead clear but RDM still triggered: retract until the
+                    # RDM clears.  With an RDM sensor, monitor it during the
+                    # retraction (early stop + overshoot) instead of blindly
+                    # pulling the full park-to-toolhead distance — the latter can
+                    # keep retracting long after the path is clear and pull the
+                    # slot's filament back over the ACE entry sensor.
                     retract_dist = self._get_config_for_tool(
                         tool_index, "parkposition_to_toolhead_length"
                     )
-                    self.gcode.respond_info(
-                        f"ACE: Toolhead clear, RDM triggered - full retract of T{tool_index} ({retract_dist}mm)"
-                    )
-
-                instance._smart_unload_slot(local_slot, length=retract_dist)
+                    if self.has_rdm_sensor():
+                        self.gcode.respond_info(
+                            f"ACE: Toolhead clear, RDM triggered - RDM-monitored "
+                            f"retract of T{tool_index} (max {retract_dist}mm)"
+                        )
+                        unload_ok = instance.rmd_triggered_unload_slot(
+                            self, local_slot,
+                            length=retract_dist,
+                            overshoot_length=instance.rdm_overshoot_length,
+                        )
+                        if not unload_ok:
+                            raise Exception(
+                                f"RDM-monitored unload of T{tool_index} failed"
+                            )
+                    else:
+                        # No RDM sensor: a fixed-length retract is the best we can
+                        # do — there is no sensor between ACE and toolhead to stop on.
+                        self.gcode.respond_info(
+                            f"ACE: Toolhead clear - full retract of T{tool_index} ({retract_dist}mm)"
+                        )
+                        instance._smart_unload_slot(local_slot, length=retract_dist)
 
                 if self.is_filament_path_free_instant():
                     self.state.set("ace_filament_pos", FILAMENT_STATE_BOWDEN)
@@ -1915,11 +1985,33 @@ class AceManager:
             f"State: filament_pos='{filament_pos}', current_tool=T{current_tool}"
         )
 
+        # Resolve the target tool's temperature up-front.  The plausibility-
+        # mismatch unloads below run before the PRE macro heats the nozzle and
+        # need a temperature to fall back on when heating for a recovery unload.
+        target_temp = 0
+        if target_tool >= 0:
+            target_ace, target_slot = get_ace_instance_and_slot_for_tool(target_tool)
+            if target_ace is not None:
+                inv_temp = target_ace.inventory[target_slot].get("temp", 0)
+                if inv_temp > 0:
+                    target_temp = inv_temp
+                    self.gcode.respond_info(
+                        f"ACE: Target tool T{target_tool} inventory temp: {target_temp}°C"
+                    )
+
         if (toolhead_sensor or rdm_sensor) and (filament_pos == FILAMENT_STATE_BOWDEN):
             self.gcode.respond_info(
                 f"ACE: PLAUSIBILITY MISMATCH - Sensors show filament present "
                 f"but state='{filament_pos}'. Performing smart_unload to clear path. May help or not..."
             )
+
+            # smart_unload may drive extruder moves: prepare_toolhead re-reads
+            # the toolhead sensor live (it can differ from the read above), and
+            # stale moves queued by a failed load can flush here.  Heat the
+            # nozzle first regardless of the current sensor read.  This runs
+            # before the PRE macro; the guard returns immediately when the
+            # nozzle is already above min_extrude_temp.
+            self._ensure_hot_for_recovery_unload(current_tool, target_temp)
 
             success = self.smart_unload(tool_index=current_tool if current_tool >= 0 else -1, keep_heater=True)
             if not success:
@@ -1944,17 +2036,6 @@ class AceManager:
             self.gcode.run_script_from_command("G92 E0")
             self.gcode.run_script_from_command("M400")
             current_tool = -1
-
-        target_temp = 0
-        if target_tool >= 0:
-            target_ace, target_slot = get_ace_instance_and_slot_for_tool(target_tool)
-            if target_ace is not None:
-                inv_temp = target_ace.inventory[target_slot].get("temp", 0)
-                if inv_temp > 0:
-                    target_temp = inv_temp
-                    self.gcode.respond_info(
-                        f"ACE: Target tool T{target_tool} inventory temp: {target_temp}°C"
-                    )
 
         # ===== HANDLE TOOL RESELECTION =====
         if current_tool == target_tool:
@@ -2137,6 +2218,13 @@ class AceManager:
             # attempting to load.  The PRE macro should have heated via M109,
             # but after error-recovery paths (plausibility mismatch, jam
             # recovery) the nozzle may still be cold.
+            #
+            # Unlike the plausibility recovery guard (_ensure_hot_for_recovery_unload),
+            # this guard fails fast by design: reaching here cold with no target
+            # temperature means BOTH the PRE macro and the recovery guard failed
+            # to heat — something is fundamentally wrong, so raising is safer than
+            # guessing a temperature and loading blind.  Do not "unify" the two
+            # guards: clearing a stuck path must degrade gracefully, loading must not.
             extruder = self.printer.lookup_object("extruder", None)
             if extruder:
                 cur_temp = extruder.get_heater().get_temp(self.reactor.monotonic())[0]
