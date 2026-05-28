@@ -16,6 +16,7 @@ Optional tangle detection (``tangle_detection: True`` in ``[ace]``):
 """
 
 import logging
+import os
 
 from .config import (
     SENSOR_TOOLHEAD,
@@ -49,9 +50,17 @@ class RunoutMonitor:
     # Klipper filament_motion_sensor cadence.
     TANGLE_CHECK_INTERVAL = 0.250
 
+    # Theoretical encoder length-per-pulse from the RDM hardware geometry
+    # (Kobra-S1/K3M reference).  Used as a comparison anchor in the
+    # baseline telemetry header — we want to know whether the real value
+    # measured from a print matches this theoretical figure.
+    THEORETICAL_LENGTH_PER_PULSE = 1.86532063806894
+
     def __init__(self, printer, gcode, reactor, endless_spool, manager,
                  runout_debounce_count=1, tangle_detection=False,
-                 tangle_detection_length=None):
+                 tangle_detection_length=None,
+                 tangle_debug=False,
+                 tangle_telemetry_log=None):
         """
         Initialize runout monitor.
 
@@ -70,6 +79,14 @@ class RunoutMonitor:
             tangle_detection_length: Distance in mm the extruder must
                 move without encoder activity before a tangle is declared.
                 Defaults to DEFAULT_TANGLE_DETECTION_LENGTH (15.0 mm).
+            tangle_debug: When True, log read-only baseline telemetry
+                (encoder, extruder, sensor states, simple-mode events)
+                on every monitor tick.  Used to characterise the simple
+                detector before deciding whether the windowed approach
+                is actually needed.  Does NOT change detection logic.
+            tangle_telemetry_log: Path to the per-tick TSV telemetry log.
+                A ``~`` is expanded.  Failures to open the file are
+                caught and disable telemetry, never crash the monitor.
         """
         self.printer = printer
         self.gcode = gcode
@@ -107,6 +124,26 @@ class RunoutMonitor:
         # Klipper objects resolved at first use
         self._extruder = None
         self._estimated_print_time = None
+
+        # --- Read-only baseline telemetry ---
+        self.tangle_debug = bool(tangle_debug)
+        self.tangle_telemetry_log = tangle_telemetry_log
+        # Lazy-initialised file handle for the TSV log.
+        self._tlm_file_handle = None
+        # If opening the log fails once, do not retry every tick.
+        self._tlm_file_open_failed = False
+        # Has the START header been emitted yet?
+        self._tlm_started = False
+        # Previous-tick values for delta calculation.
+        self._tlm_last_encoder = None
+        self._tlm_last_extruder_pos = None
+        # 1-second aggregation bucket for the klippy.log summary.
+        self._tlm_bucket_d_encoder = 0
+        self._tlm_bucket_d_extruder = 0.0
+        self._tlm_last_summary_time = None
+        # Cross-tick handoff: the simple detector tags state-changing
+        # events here, so the next telemetry tick logs them in the TSV.
+        self._tlm_pending_simple_event = ""
 
     def start_monitoring(self):
         """Start runout detection monitor loop."""
@@ -366,6 +403,16 @@ class RunoutMonitor:
             if self._runout_false_count > 0:
                 self._runout_false_count = 0
 
+            # ===== TANGLE TELEMETRY (read-only, behind tangle_debug) =====
+            # Runs BEFORE _check_tangle so simple-detector events tagged by
+            # that call appear in the NEXT telemetry tick (1-tick / 250 ms
+            # lag, acceptable for baseline characterisation).
+            if self.tangle_debug and not self.runout_handling_in_progress:
+                try:
+                    self._log_tangle_telemetry(eventtime, current_tool)
+                except Exception as e:
+                    logging.warning("ACE: tangle telemetry error: %s", e)
+
             # ===== TANGLE DETECTION (optional) =====
             if self.tangle_detection_enabled and not self.runout_handling_in_progress:
                 self._check_tangle(eventtime, current_tool)
@@ -450,16 +497,22 @@ class RunoutMonitor:
         """
         # Condition 2: feed-assist must be active
         if not self.manager.is_feed_assist_active():
+            if self.tangle_debug and self._tangle_runout_pos is not None:
+                self._tlm_pending_simple_event = "ABORT:feed_assist_lost"
             self._tangle_runout_pos = None
             return
 
         # Condition 3: RDM sensor shows filament present
         if not self.manager.get_switch_state(SENSOR_RDM):
+            if self.tangle_debug and self._tangle_runout_pos is not None:
+                self._tlm_pending_simple_event = "ABORT:rdm_cleared"
             self._tangle_runout_pos = None
             return
 
         # Condition 4: Nozzle sensor shows filament present
         if not self.manager.get_switch_state(SENSOR_TOOLHEAD):
+            if self.tangle_debug and self._tangle_runout_pos is not None:
+                self._tlm_pending_simple_event = "ABORT:toolhead_cleared"
             self._tangle_runout_pos = None
             return
 
@@ -488,6 +541,8 @@ class RunoutMonitor:
             return
 
         # ===== ALL 6 CONDITIONS MET — TANGLE DETECTED =====
+        if self.tangle_debug:
+            self._tlm_pending_simple_event = "TANGLE_FIRED"
         logging.warning(
             "ACE: TANGLE DETECTED on T%d — extruder at %.1f mm "
             "(window was %.1f mm), encoder stuck at %d pulses",
@@ -692,3 +747,201 @@ class RunoutMonitor:
             self.gcode.run_script_from_command("PAUSE")
         except Exception as e:
             self.gcode.respond_info(f"ACE: Error pausing print: {e}")
+
+    # ========== Read-only Baseline Telemetry ==========
+    #
+    # The telemetry path is strictly observational: it samples raw encoder
+    # pulses, extruder position and sensor states every monitor tick and
+    # writes them to a TSV file (per tick) and to klippy.log (aggregated
+    # once a second).  It does NOT touch tangle detection state and never
+    # raises out of the monitor.
+
+    def _get_length_per_pulse(self):
+        """Return the RDM tracker's configured length_per_pulse, or None.
+
+        Reads the underlying filament_tracker's ``length_per_pulse``
+        attribute via the FilamentTrackerAdapter on the manager.  Returns
+        ``None`` when the RDM sensor is a plain filament_switch_sensor
+        (no encoder geometry available).
+        """
+        try:
+            sensor = self.manager.sensors.get(SENSOR_RDM)
+            if sensor is None:
+                return None
+            tracker = getattr(sensor, "_tracker", None)
+            if tracker is None:
+                return None
+            return getattr(tracker, "length_per_pulse", None)
+        except Exception:
+            return None
+
+    def _open_telemetry_log(self):
+        """Open the TSV telemetry log file lazily.
+
+        Returns True on success, False on failure.  A failure disables
+        further retry attempts so a bad path cannot spam the Klipper log
+        on every monitor tick.
+        """
+        if self._tlm_file_handle is not None:
+            return True
+        if self._tlm_file_open_failed:
+            return False
+        try:
+            path = os.path.expanduser(
+                self.tangle_telemetry_log
+                or "~/printer_data/logs/ace-tangle-telemetry.log"
+            )
+            dir_path = os.path.dirname(path)
+            if dir_path:
+                os.makedirs(dir_path, exist_ok=True)
+            # Line-buffered append mode so tail records survive a
+            # printer crash mid-write.
+            self._tlm_file_handle = open(path, "a", buffering=1)
+            self._tlm_file_handle.seek(0, os.SEEK_END)
+            if self._tlm_file_handle.tell() == 0:
+                self._tlm_file_handle.write(
+                    "# ACE tangle baseline telemetry — read-only, "
+                    "no detection logic\n"
+                    "# Columns: eventtime tool encoder_pulse extruder_pos "
+                    "d_encoder d_extruder print_state feed_assist rdm "
+                    "toolhead simple_event\n"
+                )
+            self._tlm_resolved_log_path = path
+            return True
+        except Exception as e:
+            logging.warning(
+                "ACE: tangle telemetry log open failed (%s) — disabling "
+                "file output for this session", e
+            )
+            self._tlm_file_open_failed = True
+            return False
+
+    def _emit_telemetry_start_header(self):
+        """Log a one-time START line summarising the encoder calibration."""
+        if self._tlm_started:
+            return
+        self._tlm_started = True
+        actual_lpp = self._get_length_per_pulse()
+        if isinstance(actual_lpp, (int, float)):
+            actual_str = f"{actual_lpp:.6f}"
+        else:
+            actual_str = "unavailable"
+        log_path = getattr(
+            self, "_tlm_resolved_log_path", "<file open failed>"
+        )
+        header_line = (
+            f"ACE: tangle-tlm START "
+            f"length_per_pulse={actual_str} "
+            f"(theoretical={self.THEORETICAL_LENGTH_PER_PULSE:.11f}) "
+            f"log={log_path}"
+        )
+        logging.info(header_line)
+        if self._tlm_file_handle is not None:
+            try:
+                self._tlm_file_handle.write(f"# {header_line}\n")
+            except Exception:
+                pass
+
+    def _log_tangle_telemetry(self, eventtime, current_tool):
+        """Read-only baseline telemetry — one TSV row per tick, one
+        klippy.log summary per second.
+
+        Captures the raw encoder pulse count, extruder position and
+        sensor states.  Picks up any simple-detector event the previous
+        ``_check_tangle`` call left in ``_tlm_pending_simple_event`` and
+        logs it as the ``simple_event`` column.  All I/O is wrapped so
+        a broken sensor or closed file never raises out of here.
+        """
+        self._open_telemetry_log()
+        if not self._tlm_started:
+            self._emit_telemetry_start_header()
+
+        # ---- Snapshot the current state ----
+        encoder_pulse = self.manager.get_rdm_encoder_pulse()
+        encoder_value = encoder_pulse if encoder_pulse is not None else -1
+
+        extruder_pos = 0.0
+        if self._resolve_extruder():
+            try:
+                extruder_pos = self._get_extruder_pos(eventtime)
+            except Exception:
+                extruder_pos = 0.0
+
+        try:
+            feed_assist = 1 if self.manager.is_feed_assist_active() else 0
+        except Exception:
+            feed_assist = 0
+        try:
+            rdm = 1 if self.manager.get_switch_state(SENSOR_RDM) else 0
+        except Exception:
+            rdm = 0
+        try:
+            toolhead = (
+                1 if self.manager.get_switch_state(SENSOR_TOOLHEAD) else 0
+            )
+        except Exception:
+            toolhead = 0
+
+        print_state = self.last_print_state or "unknown"
+
+        # ---- Deltas ----
+        if self._tlm_last_encoder is None or encoder_value < 0:
+            d_encoder = 0
+        else:
+            d_encoder = encoder_value - self._tlm_last_encoder
+        if self._tlm_last_extruder_pos is None:
+            d_extruder = 0.0
+        else:
+            d_extruder = extruder_pos - self._tlm_last_extruder_pos
+        if encoder_value >= 0:
+            self._tlm_last_encoder = encoder_value
+        self._tlm_last_extruder_pos = extruder_pos
+
+        # Event tagged by _check_tangle on the previous tick.
+        simple_event = self._tlm_pending_simple_event
+        self._tlm_pending_simple_event = ""
+
+        # ---- TSV row ----
+        if self._tlm_file_handle is not None:
+            try:
+                self._tlm_file_handle.write(
+                    f"{eventtime:.3f}\t{current_tool}\t{encoder_value}\t"
+                    f"{extruder_pos:.3f}\t{d_encoder}\t{d_extruder:.3f}\t"
+                    f"{print_state}\t{feed_assist}\t{rdm}\t{toolhead}\t"
+                    f"{simple_event}\n"
+                )
+            except Exception as e:
+                logging.warning(
+                    "ACE: tangle telemetry write failed (%s) — disabling "
+                    "file output for this session", e
+                )
+                try:
+                    self._tlm_file_handle.close()
+                except Exception:
+                    pass
+                self._tlm_file_handle = None
+                self._tlm_file_open_failed = True
+
+        # ---- 1-second aggregation for klippy.log ----
+        self._tlm_bucket_d_encoder += d_encoder
+        self._tlm_bucket_d_extruder += d_extruder
+        if self._tlm_last_summary_time is None:
+            self._tlm_last_summary_time = eventtime
+        elapsed = eventtime - self._tlm_last_summary_time
+        if elapsed >= 1.0:
+            per_s_enc = (
+                self._tlm_bucket_d_encoder / elapsed if elapsed > 0 else 0
+            )
+            per_s_extr = (
+                self._tlm_bucket_d_extruder / elapsed if elapsed > 0 else 0
+            )
+            logging.info(
+                "ACE: tangle-tlm T%d enc=%d extr=%.1fmm "
+                "%senc/s=%.1f %sextr/s=%.2fmm fa=%d rdm=%d th=%d",
+                current_tool, encoder_value, extruder_pos,
+                "Δ", per_s_enc, "Δ", per_s_extr,
+                feed_assist, rdm, toolhead,
+            )
+            self._tlm_bucket_d_encoder = 0
+            self._tlm_bucket_d_extruder = 0.0
+            self._tlm_last_summary_time = eventtime

@@ -583,3 +583,143 @@ class TestExtruderResolution:
         assert result is True
         # lookup_object should NOT have been called
         self.printer.lookup_object.assert_not_called()
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Read-only baseline telemetry — smoke tests
+# ─────────────────────────────────────────────────────────────────────────
+
+def _make_telemetry_monitor(tmp_path, tangle_debug=True):
+    """Build a RunoutMonitor with telemetry enabled, pointed at tmp_path."""
+    printer = Mock()
+    gcode = Mock()
+    reactor = Mock()
+    reactor.NOW = 0.0
+    endless_spool = Mock()
+    manager = Mock()
+    manager.toolchange_in_progress = False
+    manager.state = Mock()
+    manager.state.get = Mock(return_value=-1)
+    manager.sensors = {}  # no RDM tracker by default
+
+    log_path = str(tmp_path / "ace-tangle-telemetry.log")
+
+    monitor = RunoutMonitor(
+        printer, gcode, reactor, endless_spool, manager,
+        runout_debounce_count=1,
+        tangle_detection=False,
+        tangle_debug=tangle_debug,
+        tangle_telemetry_log=log_path,
+    )
+    # Pre-resolve so _resolve_extruder() returns True without lookup_object.
+    monitor._extruder = Mock()
+    monitor._estimated_print_time = Mock(return_value=0.0)
+
+    # Sensible default sensor mocks — overridable per test.
+    manager.get_rdm_encoder_pulse.return_value = 100
+    manager.is_feed_assist_active.return_value = True
+    manager.get_switch_state.return_value = True
+
+    return monitor, manager, log_path
+
+
+def _data_rows(path):
+    """Read TSV data rows (skip the # comment header lines)."""
+    with open(path) as f:
+        return [line.rstrip("\n") for line in f if not line.startswith("#")]
+
+
+class TestTangleTelemetry:
+    """Smoke tests for the read-only baseline telemetry path.
+
+    These tests do NOT assert anything about tangle DETECTION behaviour
+    — the telemetry layer is supposed to be strictly observational.
+    """
+
+    def test_writes_tsv_row_per_tick(self, tmp_path):
+        monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
+        monitor._get_extruder_pos = Mock(return_value=10.0)
+
+        monitor._log_tangle_telemetry(0.25, current_tool=0)
+        monitor._log_tangle_telemetry(0.50, current_tool=0)
+
+        assert len(_data_rows(log_path)) == 2
+
+    def test_header_written_once(self, tmp_path):
+        monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
+        monitor._get_extruder_pos = Mock(return_value=10.0)
+
+        for t in (0.25, 0.50, 0.75):
+            monitor._log_tangle_telemetry(t, current_tool=0)
+
+        with open(log_path) as f:
+            content = f.read()
+        # One START line, regardless of how many ticks ran.
+        assert content.count("START") == 1
+        # Theoretical reference value is embedded for later comparison.
+        assert "theoretical=1.86532063807" in content
+
+    def test_no_crash_when_extruder_unresolvable(self, tmp_path):
+        monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
+        # Drop the pre-resolved extruder and force lookup_object to fail.
+        monitor._extruder = None
+        monitor._estimated_print_time = None
+        monitor.printer.lookup_object = Mock(side_effect=Exception("nope"))
+
+        # Must NOT raise.
+        monitor._log_tangle_telemetry(0.25, current_tool=0)
+
+        cols = _data_rows(log_path)[0].split("\t")
+        # extruder_pos column → fallback 0.000
+        assert cols[3] == "0.000"
+
+    def test_no_crash_when_encoder_pulse_none(self, tmp_path):
+        monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
+        monitor._get_extruder_pos = Mock(return_value=10.0)
+        manager.get_rdm_encoder_pulse.return_value = None  # plain switch sensor
+
+        monitor._log_tangle_telemetry(0.25, current_tool=0)
+
+        cols = _data_rows(log_path)[0].split("\t")
+        # encoder_pulse column → sentinel -1 when no tracker available
+        assert cols[2] == "-1"
+
+    def test_klippy_summary_emitted_after_one_second(self, tmp_path, caplog):
+        monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
+        monitor._get_extruder_pos = Mock(return_value=10.0)
+
+        with caplog.at_level("INFO"):
+            monitor._log_tangle_telemetry(0.25, current_tool=0)
+            monitor._log_tangle_telemetry(1.50, current_tool=0)  # >= 1s later
+
+        summaries = [
+            r.getMessage() for r in caplog.records
+            if "tangle-tlm T0 enc=" in r.getMessage()
+        ]
+        assert len(summaries) >= 1
+
+    def test_picks_up_pending_simple_event(self, tmp_path):
+        monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
+        monitor._get_extruder_pos = Mock(return_value=10.0)
+        monitor._tlm_pending_simple_event = "ABORT:feed_assist_lost"
+
+        monitor._log_tangle_telemetry(0.25, current_tool=0)
+
+        cols = _data_rows(log_path)[0].split("\t")
+        # simple_event is the last column.
+        assert cols[10] == "ABORT:feed_assist_lost"
+        # And the pending slot must be cleared so the next tick is blank.
+        assert monitor._tlm_pending_simple_event == ""
+
+    def test_file_open_failure_disables_silently(self, tmp_path):
+        monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
+        monitor._get_extruder_pos = Mock(return_value=10.0)
+
+        with patch("builtins.open", side_effect=OSError("permission denied")):
+            monitor._log_tangle_telemetry(0.25, current_tool=0)
+
+        # The failure flag must latch so subsequent ticks do not retry.
+        assert monitor._tlm_file_open_failed is True
+        assert monitor._tlm_file_handle is None
+        # Another tick must still not crash (file output already disabled).
+        monitor._log_tangle_telemetry(0.50, current_tool=0)

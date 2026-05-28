@@ -230,7 +230,12 @@ class AceManager:
             self,  # Pass manager for sensor access and state
             runout_debounce_count=self.ace_config.get("runout_debounce_count", 1),
             tangle_detection=self.ace_config.get("tangle_detection", False),
-            tangle_detection_length=self.ace_config.get("tangle_detection_length", 15.0)
+            tangle_detection_length=self.ace_config.get("tangle_detection_length", 15.0),
+            tangle_debug=self.ace_config.get("tangle_debug", False),
+            tangle_telemetry_log=self.ace_config.get(
+                "tangle_telemetry_log",
+                "~/printer_data/logs/ace-tangle-telemetry.log"
+            ),
         )
 
         self.toolchange_in_progress = False

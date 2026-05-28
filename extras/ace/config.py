@@ -202,6 +202,16 @@ def read_ace_config(config):
     ace_config["tangle_detection_length"] = config.getfloat(
         "tangle_detection_length", 15.0
     )
+    # Read-only baseline telemetry — when enabled, the runout monitor logs
+    # raw encoder / extruder values every tick to help characterise the
+    # behaviour of the simple tangle detector before changing its logic.
+    ace_config["tangle_debug"] = config.getboolean(
+        "tangle_debug", False
+    )
+    ace_config["tangle_telemetry_log"] = config.get(
+        "tangle_telemetry_log",
+        "~/printer_data/logs/ace-tangle-telemetry.log"
+    )
     # Persistence mode controls when set_and_save() actually writes to disk.
     # - deferred:  set_and_save() behaves like set() — RAM + dirty mark only;
     #              disk write is deferred until flush() (print end / disconnect).
