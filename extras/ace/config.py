@@ -207,6 +207,28 @@ def read_ace_config(config):
     ace_config["tangle_detection_length"] = config.getfloat(
         "tangle_detection_length", 15.0
     )
+    # Windowed-detector parameters (only used when
+    # tangle_detection_mode = "windowed").
+    ace_config["tangle_window_duration"] = config.getfloat(
+        "tangle_window_duration", 5.0
+    )
+    ace_config["tangle_window_min_extrude"] = config.getfloat(
+        "tangle_window_min_extrude", 20.0
+    )
+    ace_config["tangle_ratio_threshold"] = config.getfloat(
+        "tangle_ratio_threshold", 0.1
+    )
+    ace_config["tangle_confirmation_count"] = config.getint(
+        "tangle_confirmation_count", 3
+    )
+    # 0 = binary mode (default).  > 0 enables the ratio mode (hardware
+    # calibration: encoder pulses per mm of filament travel).
+    ace_config["tangle_pulses_per_mm"] = config.getfloat(
+        "tangle_pulses_per_mm", 0.0
+    )
+    ace_config["tangle_debug"] = config.getboolean(
+        "tangle_debug", False
+    )
     # Persistence mode controls when set_and_save() actually writes to disk.
     # - deferred:  set_and_save() behaves like set() — RAM + dirty mark only;
     #              disk write is deferred until flush() (print end / disconnect).

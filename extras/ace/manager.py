@@ -232,6 +232,12 @@ class AceManager:
             tangle_detection=self.ace_config.get("tangle_detection", False),
             tangle_detection_length=self.ace_config.get("tangle_detection_length", 15.0),
             tangle_detection_mode=self.ace_config.get("tangle_detection_mode", "simple"),
+            tangle_window_duration=self.ace_config.get("tangle_window_duration", 5.0),
+            tangle_window_min_extrude=self.ace_config.get("tangle_window_min_extrude", 20.0),
+            tangle_ratio_threshold=self.ace_config.get("tangle_ratio_threshold", 0.1),
+            tangle_confirmation_count=self.ace_config.get("tangle_confirmation_count", 3),
+            tangle_pulses_per_mm=self.ace_config.get("tangle_pulses_per_mm", 0.0),
+            tangle_debug=self.ace_config.get("tangle_debug", False),
         )
 
         self.toolchange_in_progress = False

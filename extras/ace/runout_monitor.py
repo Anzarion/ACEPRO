@@ -15,6 +15,7 @@ Optional tangle detection (``tangle_detection: True`` in ``[ace]``):
     consumes the RDM-to-nozzle buffer.
 """
 
+import collections
 import logging
 
 from .config import (
@@ -49,16 +50,34 @@ class RunoutMonitor:
     # Klipper filament_motion_sensor cadence.
     TANGLE_CHECK_INTERVAL = 0.250
 
-    # Valid tangle detection algorithms.  "simple" = legacy point-to-point
-    # check (extruder moved >= length while encoder pulse count unchanged).
-    # Additional modes plug into the _check_tangle dispatcher.
-    VALID_TANGLE_MODES = ("simple",)
+    # Valid tangle detection algorithms.
+    #   "simple"   = legacy point-to-point check (extruder moved >= length
+    #                while encoder pulse count unchanged).
+    #   "windowed" = sliding-window detector that compares cumulative
+    #                forward extrusion against encoder pulses over a multi-
+    #                second window.  Designed for long-Bowden setups where
+    #                the per-tick simple check sees too much compression
+    #                jitter and false-positives.
+    VALID_TANGLE_MODES = ("simple", "windowed")
     DEFAULT_TANGLE_MODE = "simple"
+
+    # Defaults for the windowed detector.
+    DEFAULT_TANGLE_WINDOW_DURATION = 5.0      # seconds of sample history
+    DEFAULT_TANGLE_WINDOW_MIN_EXTRUDE = 20.0  # mm of forward extrusion needed
+    DEFAULT_TANGLE_RATIO_THRESHOLD = 0.1      # encoder/expected ratio cutoff
+    DEFAULT_TANGLE_CONFIRMATION_COUNT = 3     # consecutive suspicious windows
+    DEFAULT_TANGLE_PULSES_PER_MM = 0.0        # 0 = binary mode (no calibration)
 
     def __init__(self, printer, gcode, reactor, endless_spool, manager,
                  runout_debounce_count=1, tangle_detection=False,
                  tangle_detection_length=None,
-                 tangle_detection_mode=None):
+                 tangle_detection_mode=None,
+                 tangle_window_duration=None,
+                 tangle_window_min_extrude=None,
+                 tangle_ratio_threshold=None,
+                 tangle_confirmation_count=None,
+                 tangle_pulses_per_mm=None,
+                 tangle_debug=False):
         """
         Initialize runout monitor.
 
@@ -77,9 +96,29 @@ class RunoutMonitor:
             tangle_detection_length: Distance in mm the extruder must
                 move without encoder activity before a tangle is declared.
                 Defaults to DEFAULT_TANGLE_DETECTION_LENGTH (15.0 mm).
-            tangle_detection_mode: Algorithm to use ("simple" only at
-                this point).  Unknown values fall back to "simple" with
+            tangle_detection_mode: Algorithm to use ("simple" or
+                "windowed").  Unknown values fall back to "simple" with
                 a warning.  Defaults to DEFAULT_TANGLE_MODE.
+            tangle_window_duration: (windowed) Sliding-window length in
+                seconds.  Defaults to DEFAULT_TANGLE_WINDOW_DURATION.
+            tangle_window_min_extrude: (windowed) Cumulative forward
+                extrusion in mm required before a window is evaluated.
+                Defaults to DEFAULT_TANGLE_WINDOW_MIN_EXTRUDE.
+            tangle_ratio_threshold: (windowed, ratio mode) Encoder /
+                expected ratio below which the window is suspicious.
+                Only used when tangle_pulses_per_mm > 0.  Defaults to
+                DEFAULT_TANGLE_RATIO_THRESHOLD.
+            tangle_confirmation_count: (windowed) Number of consecutive
+                suspicious windows required before declaring a tangle.
+                Defaults to DEFAULT_TANGLE_CONFIRMATION_COUNT.
+            tangle_pulses_per_mm: (windowed) Hardware-calibrated encoder
+                pulses per mm of filament travel.  0 (default) selects
+                the binary mode: a tangle requires the encoder to be
+                completely static across the window.  > 0 enables the
+                ratio mode (opt-in; calibration required).
+            tangle_debug: When True, log per-window diagnostics
+                (encoder delta, forward extrusion, ratio).  Off by
+                default.
         """
         self.printer = printer
         self.gcode = gcode
@@ -124,10 +163,48 @@ class RunoutMonitor:
             )
             requested_mode = self.DEFAULT_TANGLE_MODE
         self.tangle_detection_mode = requested_mode
+
+        # --- Windowed-detector parameters ---
+        self.tangle_window_duration = float(
+            tangle_window_duration if tangle_window_duration is not None
+            else self.DEFAULT_TANGLE_WINDOW_DURATION
+        )
+        self.tangle_window_min_extrude = float(
+            tangle_window_min_extrude if tangle_window_min_extrude is not None
+            else self.DEFAULT_TANGLE_WINDOW_MIN_EXTRUDE
+        )
+        self.tangle_ratio_threshold = float(
+            tangle_ratio_threshold if tangle_ratio_threshold is not None
+            else self.DEFAULT_TANGLE_RATIO_THRESHOLD
+        )
+        self.tangle_confirmation_count = max(1, int(
+            tangle_confirmation_count if tangle_confirmation_count is not None
+            else self.DEFAULT_TANGLE_CONFIRMATION_COUNT
+        ))
+        self.tangle_pulses_per_mm = float(
+            tangle_pulses_per_mm if tangle_pulses_per_mm is not None
+            else self.DEFAULT_TANGLE_PULSES_PER_MM
+        )
+        self.tangle_debug = bool(tangle_debug)
+
+        # --- Simple-mode state ---
         # Extruder position beyond which a tangle is declared
         self._tangle_runout_pos = None
         # Encoder pulse snapshot at the time the window was set
         self._tangle_encoder_snapshot = None
+
+        # --- Windowed-mode state ---
+        # Deque of (eventtime, cumulative_forward_distance_mm, encoder_pulse)
+        # tuples spanning at most tangle_window_duration seconds.
+        self._tangle_samples = collections.deque()
+        # Monotonically increasing sum of positive extruder deltas — retracts
+        # are ignored so they cannot cancel out previous extrusion.
+        self._tangle_forward_distance = 0.0
+        # Last raw extruder position seen, for the delta calculation.
+        self._tangle_last_extruder_pos = None
+        # Consecutive suspicious windows since the last clean evaluation.
+        self._tangle_consecutive_suspicious = 0
+
         # Klipper objects resolved at first use
         self._extruder = None
         self._estimated_print_time = None
@@ -455,13 +532,11 @@ class RunoutMonitor:
         self._tangle_encoder_snapshot = encoder_pulse
 
     def _check_tangle(self, eventtime, current_tool):
-        """Dispatch to the configured tangle detection algorithm.
-
-        Currently only ``simple`` is wired up; additional modes (e.g. a
-        windowed/ratio-based detector) plug in here.
-        """
+        """Dispatch to the configured tangle detection algorithm."""
         if self.tangle_detection_mode == "simple":
             return self._check_tangle_simple(eventtime, current_tool)
+        if self.tangle_detection_mode == "windowed":
+            return self._check_tangle_windowed(eventtime, current_tool)
         # __init__ already validates the mode; defensively fall back here
         # so an unexpected value never silently turns detection off.
         return self._check_tangle_simple(eventtime, current_tool)
@@ -532,6 +607,164 @@ class RunoutMonitor:
             current_encoder,
         )
         self._handle_tangle_detected(current_tool)
+
+    def _reset_tangle_windowed_state(self):
+        """Drop all collected windowed-detector state.
+
+        Called whenever the detector's pre-conditions stop holding
+        (feed-assist off, a sensor reads clear, tangle declared) so the
+        next active period starts with a fresh sample buffer and
+        counters.
+        """
+        self._tangle_samples.clear()
+        self._tangle_forward_distance = 0.0
+        self._tangle_last_extruder_pos = None
+        self._tangle_consecutive_suspicious = 0
+
+    def _check_tangle_windowed(self, eventtime, current_tool):
+        """Sliding-window tangle check (``tangle_detection_mode="windowed"``).
+
+        Compares cumulative forward extrusion vs RDM encoder pulses over a
+        multi-second window.  Designed for long-Bowden setups where the
+        per-tick simple check sees so much compression jitter that it
+        false-positives.  Two evaluation modes:
+
+        - **Binary** (default, ``tangle_pulses_per_mm == 0``): a window is
+          suspicious when the encoder pulse count does not change at all
+          across the window despite ``>= tangle_window_min_extrude`` mm of
+          forward extrusion.
+        - **Ratio** (opt-in, ``tangle_pulses_per_mm > 0``): a window is
+          suspicious when ``encoder_delta / (extrude_mm * pulses_per_mm)
+          < tangle_ratio_threshold``.
+
+        A tangle is declared after ``tangle_confirmation_count`` consecutive
+        suspicious windows.  Retracts (negative extruder deltas) are ignored
+        so they cannot mask a real tangle by cancelling earlier forward
+        motion.
+
+        Args:
+            eventtime: Current reactor eventtime.
+            current_tool: Global tool index being printed.
+        """
+        # Pre-conditions: feed-assist active, both path sensors triggered.
+        if not self.manager.is_feed_assist_active():
+            self._reset_tangle_windowed_state()
+            return
+        if not self.manager.get_switch_state(SENSOR_RDM):
+            self._reset_tangle_windowed_state()
+            return
+        if not self.manager.get_switch_state(SENSOR_TOOLHEAD):
+            self._reset_tangle_windowed_state()
+            return
+
+        encoder_pulse = self.manager.get_rdm_encoder_pulse()
+        if encoder_pulse is None:
+            # No filament_tracker available — windowed mode cannot run.
+            return
+
+        if not self._resolve_extruder():
+            return
+        extruder_pos = self._get_extruder_pos(eventtime)
+
+        # Accumulate forward-only extrusion; retracts contribute zero.
+        if self._tangle_last_extruder_pos is None:
+            self._tangle_last_extruder_pos = extruder_pos
+        delta = extruder_pos - self._tangle_last_extruder_pos
+        if delta > 0:
+            self._tangle_forward_distance += delta
+        self._tangle_last_extruder_pos = extruder_pos
+
+        self._tangle_samples.append(
+            (eventtime, self._tangle_forward_distance, encoder_pulse)
+        )
+
+        # Prune samples older than the configured window.
+        window_start = eventtime - self.tangle_window_duration
+        while (len(self._tangle_samples) > 1
+               and self._tangle_samples[0][0] < window_start):
+            self._tangle_samples.popleft()
+
+        if len(self._tangle_samples) < 2:
+            return  # need at least two samples to compute a delta
+
+        oldest_time, oldest_distance, oldest_pulse = self._tangle_samples[0]
+        newest_time, newest_distance, newest_pulse = self._tangle_samples[-1]
+
+        # Wait until the deque actually spans (close to) the window.
+        if newest_time - oldest_time < (
+                self.tangle_window_duration - 2 * self.TANGLE_CHECK_INTERVAL):
+            return
+
+        window_extrude = newest_distance - oldest_distance
+        window_encoder_delta = newest_pulse - oldest_pulse
+
+        # Not enough extrusion in this window to make a statistical judgment.
+        if window_extrude < self.tangle_window_min_extrude:
+            self._tangle_consecutive_suspicious = 0
+            if self.tangle_debug:
+                logging.info(
+                    "ACE: tangle/windowed [T%d] inconclusive — "
+                    "extrude=%.1fmm < min=%.1fmm (encoder Δ=%d)",
+                    current_tool, window_extrude,
+                    self.tangle_window_min_extrude,
+                    window_encoder_delta,
+                )
+            return
+
+        # Evaluate the window.
+        if self.tangle_pulses_per_mm > 0.0:
+            expected = window_extrude * self.tangle_pulses_per_mm
+            ratio = (window_encoder_delta / expected) if expected > 0 else 0.0
+            suspicious = ratio < self.tangle_ratio_threshold
+            if self.tangle_debug:
+                logging.info(
+                    "ACE: tangle/windowed [T%d] ratio mode — "
+                    "extrude=%.1fmm encoder Δ=%d expected=%.1f ratio=%.2f "
+                    "threshold=%.2f suspicious=%s",
+                    current_tool, window_extrude, window_encoder_delta,
+                    expected, ratio, self.tangle_ratio_threshold, suspicious,
+                )
+        else:
+            # Binary mode: encoder must have moved at least one pulse.
+            suspicious = (window_encoder_delta == 0)
+            if self.tangle_debug:
+                logging.info(
+                    "ACE: tangle/windowed [T%d] binary mode — "
+                    "extrude=%.1fmm encoder Δ=%d suspicious=%s",
+                    current_tool, window_extrude, window_encoder_delta,
+                    suspicious,
+                )
+
+        if suspicious:
+            self._tangle_consecutive_suspicious += 1
+            if self.tangle_debug:
+                logging.info(
+                    "ACE: tangle/windowed [T%d] suspicious window %d/%d",
+                    current_tool,
+                    self._tangle_consecutive_suspicious,
+                    self.tangle_confirmation_count,
+                )
+            if (self._tangle_consecutive_suspicious
+                    >= self.tangle_confirmation_count):
+                logging.warning(
+                    "ACE: TANGLE DETECTED (windowed) on T%d — "
+                    "%.1fmm extruded with encoder Δ=%d over %.1fs "
+                    "(confirmed across %d windows)",
+                    current_tool, window_extrude, window_encoder_delta,
+                    newest_time - oldest_time,
+                    self._tangle_consecutive_suspicious,
+                )
+                self._reset_tangle_windowed_state()
+                self._handle_tangle_detected(current_tool)
+        else:
+            if (self._tangle_consecutive_suspicious > 0
+                    and self.tangle_debug):
+                logging.info(
+                    "ACE: tangle/windowed [T%d] suspicion cleared "
+                    "after %d window(s)",
+                    current_tool, self._tangle_consecutive_suspicious,
+                )
+            self._tangle_consecutive_suspicious = 0
 
     def _handle_tangle_detected(self, tool_index):
         """Handle a confirmed spool tangle.
