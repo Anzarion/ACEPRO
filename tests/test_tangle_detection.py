@@ -864,6 +864,75 @@ class TestTangleTelemetry:
 
 
 # ─────────────────────────────────────────────────────────────────────────
+# Layer column — slicer-supplied current_layer in TSV
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class TestLayerColumn:
+    """The TSV's 12th column carries print_stats.info.current_layer so
+    later analysis can correlate stalls with first-layer / specific
+    layers.  Falls back to '-' when the slicer hasn't called
+    SET_PRINT_STATS_INFO yet."""
+
+    def _wire_print_stats(self, monitor, current_layer):
+        """Make printer.lookup_object('print_stats') return a stats
+        object whose info dict carries current_layer."""
+        info = {"current_layer": current_layer}
+        stats = Mock()
+        stats.get_status = Mock(return_value={"info": info})
+        monitor.printer.lookup_object = Mock(
+            side_effect=lambda name, default=None:
+                stats if name == "print_stats" else default
+        )
+
+    def test_layer_column_present_when_slicer_set_it(self, tmp_path):
+        monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
+        monitor._get_extruder_pos = Mock(return_value=10.0)
+        self._wire_print_stats(monitor, current_layer=42)
+
+        monitor._log_tangle_telemetry(0.25, current_tool=0)
+
+        rows = _data_rows(log_path)
+        assert len(rows) == 1
+        cols = rows[0].split("\t")
+        assert cols[11] == "42", f"layer column: {cols}"
+
+    def test_layer_column_dash_when_print_stats_missing(self, tmp_path):
+        """No print_stats object at all → fall back to '-' (no crash)."""
+        monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
+        monitor._get_extruder_pos = Mock(return_value=10.0)
+        monitor.printer.lookup_object = Mock(return_value=None)
+
+        monitor._log_tangle_telemetry(0.25, current_tool=0)
+
+        cols = _data_rows(log_path)[0].split("\t")
+        assert cols[11] == "-", f"layer column: {cols}"
+
+    def test_layer_column_dash_when_slicer_didnt_set_layer(self, tmp_path):
+        """print_stats present but info.current_layer is None — the
+        slicer just hasn't called SET_PRINT_STATS_INFO yet."""
+        monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
+        monitor._get_extruder_pos = Mock(return_value=10.0)
+        self._wire_print_stats(monitor, current_layer=None)
+
+        monitor._log_tangle_telemetry(0.25, current_tool=0)
+
+        cols = _data_rows(log_path)[0].split("\t")
+        assert cols[11] == "-", f"layer column: {cols}"
+
+    def test_layer_column_in_header(self, tmp_path):
+        """The TSV header must mention the new 'layer' column so later
+        analysis tooling can parse it by name instead of position."""
+        monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
+        monitor._get_extruder_pos = Mock(return_value=10.0)
+        monitor._log_tangle_telemetry(0.25, current_tool=0)
+
+        with open(log_path) as f:
+            header = f.read().split("\n")[1]  # second comment line = columns
+        assert "layer" in header, f"layer not in column header: {header}"
+
+
+# ─────────────────────────────────────────────────────────────────────────
 # TANGLE_TELEMETRY_MARK — model-start anchor
 # ─────────────────────────────────────────────────────────────────────────
 

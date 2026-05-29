@@ -894,7 +894,7 @@ class RunoutMonitor:
                 "no detection logic\n"
                 "# Columns: eventtime tool encoder_pulse extruder_pos "
                 "d_encoder d_extruder print_state feed_assist rdm "
-                "toolhead simple_event\n"
+                "toolhead simple_event layer\n"
             )
             self._tlm_resolved_log_path = path
             return True
@@ -1003,6 +1003,22 @@ class RunoutMonitor:
 
         print_state = self.last_print_state or "unknown"
 
+        # ---- Current layer (best-effort, '-' if not set by slicer) ----
+        # Slicers expose layer via SET_PRINT_STATS_INFO CURRENT_LAYER=...
+        # in their G-code; the value lands on print_stats.info.current_layer
+        # and is None until first written.  We log it raw so the analyst
+        # can correlate stalls with first-layer / specific layers.
+        current_layer = "-"
+        try:
+            print_stats = self.printer.lookup_object("print_stats", None)
+            if print_stats is not None:
+                info = print_stats.get_status(eventtime).get("info", {})
+                layer_val = info.get("current_layer")
+                if layer_val is not None:
+                    current_layer = str(layer_val)
+        except Exception:
+            pass
+
         # ---- Deltas ----
         if self._tlm_last_encoder is None or encoder_value < 0:
             d_encoder = 0
@@ -1027,7 +1043,7 @@ class RunoutMonitor:
                     f"{eventtime:.3f}\t{current_tool}\t{encoder_value}\t"
                     f"{extruder_pos:.3f}\t{d_encoder}\t{d_extruder:.3f}\t"
                     f"{print_state}\t{feed_assist}\t{rdm}\t{toolhead}\t"
-                    f"{simple_event}\n"
+                    f"{simple_event}\t{current_layer}\n"
                 )
             except Exception as e:
                 logging.warning(
