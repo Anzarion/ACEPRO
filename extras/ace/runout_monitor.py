@@ -149,6 +149,92 @@ class RunoutMonitor:
         # the on/off transition itself.  None on the very first tick.
         self._tlm_prev_feed_assist = None
 
+        # --- Model-start anchor (TANGLE_TELEMETRY_MARK) ---
+        # Snapshot taken when the user-issued mark fires from PRINT_START,
+        # immediately before the slicer's first model move.  Lets later
+        # analysis cut away heating/prime/purge/travel and look at the
+        # encoder/extruder behaviour from t0 = first model G-code.
+        self._mark_eventtime = None
+        self._mark_extruder_pos = None
+        self._mark_encoder_pulse = None
+        self._mark_label = None
+
+        # Register the GCODE command used to drop a mark into the log.
+        # Safe to register unconditionally — handler is a no-op when
+        # telemetry is disabled.
+        self.gcode.register_command(
+            "TANGLE_TELEMETRY_MARK",
+            self.cmd_TANGLE_TELEMETRY_MARK,
+            desc=self.cmd_TANGLE_TELEMETRY_MARK_help,
+        )
+
+    cmd_TANGLE_TELEMETRY_MARK_help = (
+        "Stamp the tangle telemetry log with a labelled marker. "
+        "Use at the end of PRINT_START — directly before the first model "
+        "G-code — so later analysis can locate the true model-print start. "
+        "LABEL= (optional, default 'model_start')."
+    )
+
+    def cmd_TANGLE_TELEMETRY_MARK(self, gcmd):
+        """Snapshot current encoder/extruder values and emit a marker.
+
+        Writes a single ``# MARK ...`` comment line into the telemetry TSV
+        capturing eventtime, encoder_pulse, extruder_pos and the label.
+        The same values are also stored as instance state so subsequent
+        analyses / detection logic can compute deltas relative to the mark.
+
+        Does nothing harmful when tangle_debug is off or the telemetry
+        file failed to open — the snapshot still lands on the instance
+        state, but no TSV row is produced.
+        """
+        label = gcmd.get("LABEL", "model_start")
+        eventtime = self.reactor.monotonic()
+
+        # Extruder position — best effort.  When the extruder cannot be
+        # resolved (e.g. very early in startup) leave the field empty.
+        extruder_pos = None
+        if self._resolve_extruder():
+            try:
+                extruder_pos = self._get_extruder_pos(eventtime)
+            except Exception as e:
+                logging.warning(
+                    "ACE: TANGLE_TELEMETRY_MARK: extruder_pos read failed: %s",
+                    e,
+                )
+
+        encoder_pulse = self.manager.get_rdm_encoder_pulse()
+
+        self._mark_eventtime = eventtime
+        self._mark_extruder_pos = extruder_pos
+        self._mark_encoder_pulse = encoder_pulse
+        self._mark_label = label
+
+        ext_str = (
+            f"{extruder_pos:.3f}" if isinstance(extruder_pos, (int, float))
+            else "n/a"
+        )
+        enc_str = (
+            f"{encoder_pulse}" if isinstance(encoder_pulse, int) else "n/a"
+        )
+        mark_line = (
+            f"# MARK label={label} eventtime={eventtime:.3f} "
+            f"extruder_pos={ext_str} encoder_pulse={enc_str}"
+        )
+
+        if self.tangle_debug and self._open_telemetry_log():
+            try:
+                self._tlm_file_handle.write(mark_line + "\n")
+            except Exception as e:
+                logging.warning(
+                    "ACE: TANGLE_TELEMETRY_MARK: TSV write failed: %s", e
+                )
+
+        logging.info("ACE: %s", mark_line.lstrip("# "))
+        gcmd.respond_info(
+            f"TANGLE_TELEMETRY_MARK: label={label} "
+            f"extruder_pos={ext_str} encoder_pulse={enc_str}"
+        )
+
     def start_monitoring(self):
         """Start runout detection monitor loop."""
         self.gcode.respond_info("ACE: Starting runout detection monitor")

@@ -861,3 +861,159 @@ class TestTangleTelemetry:
             monitor._log_tangle_telemetry(t, current_tool=0)
 
         assert len(_data_rows(log_path)) == 5
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# TANGLE_TELEMETRY_MARK — model-start anchor
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def _make_gcmd(label=None):
+    """Build a fake gcmd whose .get('LABEL', default) honours `label`."""
+    gcmd = Mock()
+    if label is None:
+        gcmd.get.side_effect = lambda key, default=None: default
+    else:
+        def _get(key, default=None):
+            if key == "LABEL":
+                return label
+            return default
+        gcmd.get.side_effect = _get
+    return gcmd
+
+
+def _mark_comment_lines(path):
+    """Read MARK comment lines from the telemetry log."""
+    with open(path) as f:
+        return [line.rstrip("\n") for line in f if line.startswith("# MARK ")]
+
+
+class TestTelemetryMark:
+    """The TANGLE_TELEMETRY_MARK gcode command snapshots the current
+    encoder/extruder values and stamps a marker into the TSV.  Used in
+    PRINT_START to flag the start of the actual model print (after
+    purge/prime), so analysis can compute deltas from t0."""
+
+    def test_mark_writes_comment_line(self, tmp_path):
+        monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
+        monitor._get_extruder_pos = Mock(return_value=42.5)
+        manager.get_rdm_encoder_pulse.return_value = 17
+        monitor.reactor.monotonic = Mock(return_value=1234.5)
+
+        # First flush the header / data row so the TSV file exists.
+        monitor._log_tangle_telemetry(1.0, current_tool=0)
+
+        monitor.cmd_TANGLE_TELEMETRY_MARK(_make_gcmd(label="model_start"))
+
+        marks = _mark_comment_lines(log_path)
+        assert len(marks) == 1
+        assert "label=model_start" in marks[0]
+        assert "extruder_pos=42.500" in marks[0]
+        assert "encoder_pulse=17" in marks[0]
+        assert "eventtime=1234.500" in marks[0]
+
+    def test_mark_stores_anchor_state(self, tmp_path):
+        monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
+        monitor._get_extruder_pos = Mock(return_value=300.0)
+        manager.get_rdm_encoder_pulse.return_value = 250
+        monitor.reactor.monotonic = Mock(return_value=99.0)
+
+        monitor.cmd_TANGLE_TELEMETRY_MARK(_make_gcmd(label="model_start"))
+
+        assert monitor._mark_label == "model_start"
+        assert monitor._mark_extruder_pos == 300.0
+        assert monitor._mark_encoder_pulse == 250
+        assert monitor._mark_eventtime == 99.0
+
+    def test_mark_default_label(self, tmp_path):
+        monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
+        monitor._get_extruder_pos = Mock(return_value=10.0)
+        manager.get_rdm_encoder_pulse.return_value = 5
+        monitor.reactor.monotonic = Mock(return_value=1.0)
+
+        # No LABEL argument — should default to "model_start".
+        monitor.cmd_TANGLE_TELEMETRY_MARK(_make_gcmd(label=None))
+
+        assert monitor._mark_label == "model_start"
+
+    def test_mark_overwrites_previous(self, tmp_path):
+        monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
+        monitor._get_extruder_pos = Mock(return_value=10.0)
+        manager.get_rdm_encoder_pulse.return_value = 5
+        monitor.reactor.monotonic = Mock(side_effect=[1.0, 99.0])
+
+        monitor.cmd_TANGLE_TELEMETRY_MARK(_make_gcmd(label="first"))
+        # Second mark with different values.
+        monitor._get_extruder_pos = Mock(return_value=500.0)
+        manager.get_rdm_encoder_pulse.return_value = 400
+        monitor.cmd_TANGLE_TELEMETRY_MARK(_make_gcmd(label="second"))
+
+        # Anchor state reflects the second mark only.
+        assert monitor._mark_label == "second"
+        assert monitor._mark_extruder_pos == 500.0
+        assert monitor._mark_encoder_pulse == 400
+        assert monitor._mark_eventtime == 99.0
+        # Both mark lines are present in the TSV.
+        marks = _mark_comment_lines(log_path)
+        assert len(marks) == 2
+        assert "label=first" in marks[0]
+        assert "label=second" in marks[1]
+
+    def test_mark_without_open_log_does_not_crash(self, tmp_path):
+        """When tangle_debug=False the TSV is never opened — the command
+        must still snapshot anchor state without raising."""
+        monitor, manager, log_path = _make_telemetry_monitor(
+            tmp_path, tangle_debug=False
+        )
+        monitor._get_extruder_pos = Mock(return_value=10.0)
+        manager.get_rdm_encoder_pulse.return_value = 5
+        monitor.reactor.monotonic = Mock(return_value=1.0)
+
+        monitor.cmd_TANGLE_TELEMETRY_MARK(_make_gcmd(label="x"))
+
+        assert monitor._mark_extruder_pos == 10.0
+        assert monitor._mark_encoder_pulse == 5
+        # Telemetry file should not exist when tangle_debug=False.
+        import os
+        assert not os.path.exists(log_path)
+
+    def test_mark_handles_unresolvable_extruder(self, tmp_path):
+        """If the extruder isn't resolvable, the mark should still fire
+        with extruder_pos=None and write 'n/a' into the TSV."""
+        monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
+        # Force _resolve_extruder to fail.
+        monitor._extruder = None
+        monitor.printer.lookup_object.side_effect = Exception("boom")
+        manager.get_rdm_encoder_pulse.return_value = 7
+        monitor.reactor.monotonic = Mock(return_value=42.0)
+
+        monitor._log_tangle_telemetry(1.0, current_tool=0)
+        monitor.cmd_TANGLE_TELEMETRY_MARK(_make_gcmd(label="model_start"))
+
+        assert monitor._mark_extruder_pos is None
+        assert monitor._mark_encoder_pulse == 7
+        marks = _mark_comment_lines(log_path)
+        assert len(marks) == 1
+        assert "extruder_pos=n/a" in marks[0]
+        assert "encoder_pulse=7" in marks[0]
+
+    def test_mark_registered_in_init(self):
+        """The command must be registered during __init__ so PRINT_START
+        can call it the very first time it runs."""
+        printer = Mock()
+        gcode = Mock()
+        reactor = Mock()
+        reactor.NOW = 0.0
+        manager = Mock()
+        manager.state = Mock()
+        manager.state.get = Mock(return_value=-1)
+
+        RunoutMonitor(
+            printer, gcode, reactor, Mock(), manager,
+            runout_debounce_count=1,
+            tangle_detection=False,
+            tangle_debug=False,
+        )
+
+        registered = [c.args[0] for c in gcode.register_command.call_args_list]
+        assert "TANGLE_TELEMETRY_MARK" in registered
