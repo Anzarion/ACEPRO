@@ -645,6 +645,41 @@ class TestTangleTelemetry:
 
         assert len(_data_rows(log_path)) == 2
 
+    def test_deltas_computed_correctly_across_ticks(self, tmp_path):
+        """Repro for the hardware-observed bug where d_encoder / d_extruder
+        stayed at 0 across ticks even though the raw values were rising."""
+        monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
+
+        # Tick 1: encoder=100, extruder=10.0  → first tick, deltas should be 0
+        manager.get_rdm_encoder_pulse.return_value = 100
+        monitor._get_extruder_pos = Mock(return_value=10.0)
+        monitor._log_tangle_telemetry(0.25, current_tool=0)
+
+        # Tick 2: encoder=105, extruder=15.0  → d_enc=5, d_extr=5.000
+        manager.get_rdm_encoder_pulse.return_value = 105
+        monitor._get_extruder_pos = Mock(return_value=15.0)
+        monitor._log_tangle_telemetry(0.50, current_tool=0)
+
+        # Tick 3: encoder=107, extruder=18.5  → d_enc=2, d_extr=3.500
+        manager.get_rdm_encoder_pulse.return_value = 107
+        monitor._get_extruder_pos = Mock(return_value=18.5)
+        monitor._log_tangle_telemetry(0.75, current_tool=0)
+
+        rows = _data_rows(log_path)
+        assert len(rows) == 3
+        # Row 1: deltas zero (no previous)
+        c1 = rows[0].split("\t")
+        assert c1[4] == "0", f"row 1 d_encoder: {c1}"
+        assert c1[5] == "0.000", f"row 1 d_extruder: {c1}"
+        # Row 2: d_encoder=5, d_extruder=5.000
+        c2 = rows[1].split("\t")
+        assert c2[4] == "5", f"row 2 d_encoder: {c2}"
+        assert c2[5] == "5.000", f"row 2 d_extruder: {c2}"
+        # Row 3: d_encoder=2, d_extruder=3.500
+        c3 = rows[2].split("\t")
+        assert c3[4] == "2", f"row 3 d_encoder: {c3}"
+        assert c3[5] == "3.500", f"row 3 d_extruder: {c3}"
+
     def test_header_written_once(self, tmp_path):
         monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
         monitor._get_extruder_pos = Mock(return_value=10.0)
@@ -723,3 +758,82 @@ class TestTangleTelemetry:
         assert monitor._tlm_file_handle is None
         # Another tick must still not crash (file output already disabled).
         monitor._log_tangle_telemetry(0.50, current_tool=0)
+
+    # ── Gating on feed_assist ────────────────────────────────────────────
+
+    def test_idle_ticks_skipped_when_feed_assist_inactive(self, tmp_path):
+        """No TSV rows and no log file at all while feed_assist stays off."""
+        monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
+        monitor._get_extruder_pos = Mock(return_value=10.0)
+        manager.is_feed_assist_active.return_value = False
+
+        for t in (0.25, 0.50, 0.75, 1.00, 1.25):
+            monitor._log_tangle_telemetry(t, current_tool=0)
+
+        # File should not even have been created — gate cuts before open.
+        import os
+        assert not os.path.exists(log_path)
+
+    def test_off_to_on_transition_logged_and_resets_baseline(self, tmp_path):
+        """The off→on transition logs a row AND resets the delta baseline,
+        so the first active tick reports d=0 — no spurious gap across the
+        idle period."""
+        monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
+
+        # First a few idle ticks (no logging) — extruder/encoder advance
+        # in the background but we don't see them.
+        manager.is_feed_assist_active.return_value = False
+        manager.get_rdm_encoder_pulse.return_value = 50
+        monitor._get_extruder_pos = Mock(return_value=5.0)
+        for t in (0.25, 0.50):
+            monitor._log_tangle_telemetry(t, current_tool=0)
+
+        # Now feed_assist comes on at tick 0.75 (with much higher values
+        # than the last idle observation).
+        manager.is_feed_assist_active.return_value = True
+        manager.get_rdm_encoder_pulse.return_value = 200
+        monitor._get_extruder_pos = Mock(return_value=120.0)
+        monitor._log_tangle_telemetry(0.75, current_tool=0)
+
+        rows = _data_rows(log_path)
+        assert len(rows) == 1, f"expected only the transition row: {rows}"
+        cols = rows[0].split("\t")
+        # fa column == 1 (the transition target state)
+        assert cols[7] == "1", f"fa column: {cols}"
+        # Deltas reset to 0 even though absolute values jumped 50→200 / 5→120
+        assert cols[4] == "0", f"d_encoder should be reset: {cols}"
+        assert cols[5] == "0.000", f"d_extruder should be reset: {cols}"
+
+    def test_on_to_off_transition_logged(self, tmp_path):
+        """The on→off transition is logged with fa=0 so the boundary is
+        visible in the TSV."""
+        monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
+        monitor._get_extruder_pos = Mock(return_value=10.0)
+
+        # Two active ticks.
+        for t in (0.25, 0.50):
+            monitor._log_tangle_telemetry(t, current_tool=0)
+
+        # Feed-assist drops at tick 0.75.
+        manager.is_feed_assist_active.return_value = False
+        monitor._log_tangle_telemetry(0.75, current_tool=0)
+
+        # Subsequent idle ticks are silent again.
+        for t in (1.00, 1.25):
+            monitor._log_tangle_telemetry(t, current_tool=0)
+
+        rows = _data_rows(log_path)
+        assert len(rows) == 3  # 2 active + 1 off-transition
+        # Last row is the on→off transition: fa=0
+        cols = rows[-1].split("\t")
+        assert cols[7] == "0", f"fa column on off-transition: {cols}"
+
+    def test_active_ticks_logged_continuously(self, tmp_path):
+        """While feed_assist stays True every tick should produce a row."""
+        monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
+        monitor._get_extruder_pos = Mock(return_value=10.0)
+
+        for t in (0.25, 0.50, 0.75, 1.00, 1.25):
+            monitor._log_tangle_telemetry(t, current_tool=0)
+
+        assert len(_data_rows(log_path)) == 5

@@ -144,6 +144,10 @@ class RunoutMonitor:
         # Cross-tick handoff: the simple detector tags state-changing
         # events here, so the next telemetry tick logs them in the TSV.
         self._tlm_pending_simple_event = ""
+        # Previous feed_assist state — used by _log_tangle_telemetry to
+        # skip idle ticks (pre-print, between prints) while still capturing
+        # the on/off transition itself.  None on the very first tick.
+        self._tlm_prev_feed_assist = None
 
     def start_monitoring(self):
         """Start runout detection monitor loop."""
@@ -851,7 +855,36 @@ class RunoutMonitor:
         ``_check_tangle`` call left in ``_tlm_pending_simple_event`` and
         logs it as the ``simple_event`` column.  All I/O is wrapped so
         a broken sensor or closed file never raises out of here.
+
+        Gating: ticks are skipped while feed-assist is inactive, except
+        for the on→off and off→on transitions themselves.  This keeps
+        the TSV focused on the actual extrusion phase (no QGL / bed-mesh
+        / homing noise) while still capturing the boundary events that
+        bracket each print or toolchange.
         """
+        # ---- Gate: skip idle ticks, log transitions ----
+        try:
+            feed_assist_active = self.manager.is_feed_assist_active()
+        except Exception:
+            feed_assist_active = False
+        transition = (
+            self._tlm_prev_feed_assist is not None
+            and self._tlm_prev_feed_assist != feed_assist_active
+        )
+        # Always update prev, even when skipping.
+        self._tlm_prev_feed_assist = feed_assist_active
+        if not feed_assist_active and not transition:
+            return
+        # On the off→on transition, reset the delta baseline so the first
+        # active tick reports d=0 instead of a gap accumulated across the
+        # idle period.
+        if transition and feed_assist_active:
+            self._tlm_last_encoder = None
+            self._tlm_last_extruder_pos = None
+            self._tlm_last_summary_time = None
+            self._tlm_bucket_d_encoder = 0
+            self._tlm_bucket_d_extruder = 0.0
+
         self._open_telemetry_log()
         if not self._tlm_started:
             self._emit_telemetry_start_header()
