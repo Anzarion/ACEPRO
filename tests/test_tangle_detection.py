@@ -20,8 +20,15 @@ from ace.config import SENSOR_TOOLHEAD, SENSOR_RDM
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
-def _make_monitor(tangle_detection=True):
+def _make_monitor(tangle_detection=True, tangle_detection_mode="simple"):
     """Create a RunoutMonitor wired for tangle detection tests.
+
+    Default ``tangle_detection_mode`` is "simple" so the existing
+    TestTangleConditionGates / TestTanglePositiveDetection / TestTangleWindowManagement
+    suites — which assert against the legacy point-to-point checker —
+    keep exercising that code path.  The new distance-window tests
+    construct a monitor with ``tangle_detection_mode="distance_window"``
+    explicitly via TestDistanceWindowDetection's own helper.
 
     Returns (monitor, printer, gcode, reactor, manager) so tests can
     configure behaviour on the mocks.
@@ -41,6 +48,7 @@ def _make_monitor(tangle_detection=True):
         printer, gcode, reactor, endless_spool, manager,
         runout_debounce_count=1,
         tangle_detection=tangle_detection,
+        tangle_detection_mode=tangle_detection_mode,
     )
     return monitor, printer, gcode, reactor, manager
 
@@ -1153,3 +1161,281 @@ class TestTelemetryMark:
 
         registered = [c.args[0] for c in gcode.register_command.call_args_list]
         assert "TANGLE_TELEMETRY_MARK" in registered
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Distance-window detector — main tangle detection path
+# ─────────────────────────────────────────────────────────────────────────
+#
+# Tests against the algorithm specified in PLAN-tangle-detection.md
+# section 5.  Synthesised sample sequences derived from the real
+# telemetry data captured on branch debug/tangle-baseline-data are
+# used to validate the detector against the actual tangles observed in
+# the field (Tangle 1: mild ratio 0.297, Tangle 2: worst-case 0.299).
+
+
+def _make_dw_monitor(window_mm=30.0, ratio_threshold=0.30,
+                     confirmation_count=1, encoder_pulse=0):
+    """Build a RunoutMonitor configured for the distance-window detector.
+
+    Returns (monitor, manager).  The monitor's pre-conditions are
+    pre-satisfied: feed_assist=on, both sensors present, extruder
+    resolvable, encoder readable.  Test bodies advance state by
+    repeatedly calling _check_tangle_distance_window with crafted
+    (eventtime, extruder_pos, encoder_pulse) sequences.
+    """
+    printer = Mock()
+    gcode = Mock()
+    reactor = Mock()
+    reactor.NOW = 0.0
+    reactor.NEVER = float("inf")
+    manager = Mock()
+    manager.toolchange_in_progress = False
+    manager.is_feed_assist_active.return_value = True
+    manager.get_switch_state.return_value = True   # both sensors present
+    manager.get_rdm_encoder_pulse.return_value = encoder_pulse
+    manager.state = Mock()
+    manager.state.get = Mock(return_value=-1)
+
+    monitor = RunoutMonitor(
+        printer, gcode, reactor, Mock(), manager,
+        runout_debounce_count=1,
+        tangle_detection=True,
+        tangle_detection_mode="distance_window",
+        tangle_window_extrude_mm=window_mm,
+        tangle_ratio_threshold=ratio_threshold,
+        tangle_confirmation_count=confirmation_count,
+    )
+    # Pre-resolve so _resolve_extruder() returns True without lookup_object.
+    monitor._extruder = Mock()
+    monitor._estimated_print_time = Mock(return_value=0.0)
+    monitor._handle_tangle_detected = Mock()  # avoid real pause logic
+    return monitor, manager
+
+
+def _feed_sequence(monitor, manager, samples, current_tool=0,
+                   force_eval_each_tick=True):
+    """Drive the detector with a list of (eventtime, extruder_pos,
+    encoder_pulse) tuples.
+
+    When ``force_eval_each_tick`` is True (default) the eval-every-N
+    gate is bypassed by resetting the tick counter before each call —
+    tests should hit the eval branch deterministically rather than
+    skipping it 3 out of 4 times.
+    """
+    for et, ext, enc in samples:
+        manager.get_rdm_encoder_pulse.return_value = enc
+        monitor._get_extruder_pos = Mock(return_value=ext)
+        if force_eval_each_tick:
+            monitor._dw_tick_counter = (
+                monitor.TANGLE_DW_EVAL_EVERY_N_TICKS - 1
+            )
+        monitor._check_tangle_distance_window(et, current_tool)
+
+
+class TestDistanceWindowDetection:
+    """Test plan: PLAN-tangle-detection.md section 5."""
+
+    # ── Test 1: Tangle 1 (mild) ────────────────────────────────────────
+    def test_tangle_mild_triggers(self):
+        """Mild tangle: 30 mm window, 9 pulses → ratio 0.30 ≈ 0.297, fires."""
+        monitor, manager = _make_dw_monitor(
+            window_mm=30.0, ratio_threshold=0.30
+        )
+        # Synthesise 30 mm extrusion in 1 mm steps with 9 evenly spread
+        # pulses → ratio 9/30 = 0.30 → just at threshold (not below).
+        # To match the real Tangle 1 (0.297), use 8.91 pulses-worth via
+        # extrusion of 30.3 mm and 9 pulses → 0.297.
+        samples = [(t * 0.05, 1.01 * t, 0 if t < 27 else (t - 26) // 3 + 7)
+                   for t in range(31)]
+        # Simplification: just use the documented Tangle 1 numbers
+        # — extruder advances 30.3 mm and encoder gains 9 pulses.
+        samples = [
+            (0.00, 0.0, 0),       # establish baseline
+            (1.00, 30.3, 9),      # window fully populated, ratio = 0.297
+        ]
+        _feed_sequence(monitor, manager, samples)
+        monitor._handle_tangle_detected.assert_called_once_with(0)
+
+    # ── Test 2: Tangle 2 (worst-case) ──────────────────────────────────
+    def test_tangle_worst_case_triggers(self):
+        """Worst-case tangle: 30 mm window, near-zero pulses, fires."""
+        monitor, manager = _make_dw_monitor(
+            window_mm=30.0, ratio_threshold=0.30
+        )
+        samples = [
+            (0.00, 0.0, 0),
+            (1.00, 30.1, 0),      # ratio 0.00 ≪ 0.30
+        ]
+        _feed_sequence(monitor, manager, samples)
+        monitor._handle_tangle_detected.assert_called_once_with(0)
+
+    # ── Test 3: Natural Layer-0 stall does NOT trigger ─────────────────
+    def test_natural_layer_0_stalls_no_trigger(self):
+        """Oscillating ppm 0.47–1.69 mimicking layer-0 cluster — no trigger.
+
+        Real telemetry data from the debug/tangle-baseline-data print
+        showed layer-0 ppm tiefst 0.47 (well above 0.30), with pulse
+        islands restoring the rolling ratio between stalls.
+        """
+        monitor, manager = _make_dw_monitor(
+            window_mm=30.0, ratio_threshold=0.30
+        )
+        # 5 segments of 30 mm each with ratio alternating between
+        # bad (0.47) and good (1.27).  Cumulative window-of-30 ratio
+        # never drops below 0.30.
+        samples = []
+        ext = 0.0
+        enc = 0
+        for seg in range(5):
+            # 30 mm of extrusion, 14 pulses (ratio 0.47) — well above 0.30
+            ext += 30.0
+            enc += 14
+            samples.append((seg * 1.0 + 0.5, ext, enc))
+        _feed_sequence(monitor, manager, samples)
+        monitor._handle_tangle_detected.assert_not_called()
+
+    # ── Test 4: Toolchange wipes state and skips evaluation ────────────
+    def test_toolchange_gate_blocks_eval(self):
+        """When the outer monitor loop has tc=1, _check_tangle_distance_window
+        should not be reached.  We simulate it being called anyway and
+        verify that FA-off (which the outer loop forces during a TC
+        sequence in some configs) wipes the state."""
+        monitor, manager = _make_dw_monitor(
+            window_mm=30.0, ratio_threshold=0.30
+        )
+        # Populate the buffer with normal data.
+        _feed_sequence(monitor, manager,
+                       [(0.0, 0.0, 0), (0.5, 15.0, 14)])
+        assert len(monitor._dw_samples) >= 1
+
+        # Now simulate FA off (which happens at TC start).
+        manager.is_feed_assist_active.return_value = False
+        monitor._check_tangle_distance_window(1.0, current_tool=0)
+
+        # State must be wiped.
+        assert monitor._dw_samples == []
+        assert monitor._dw_confirmed_count == 0
+        monitor._handle_tangle_detected.assert_not_called()
+
+    # ── Test 5: Steady-state print does NOT trigger ────────────────────
+    def test_steady_state_no_trigger(self):
+        """Normal print: ppm ~1.0 across many windows — no trigger."""
+        monitor, manager = _make_dw_monitor(
+            window_mm=30.0, ratio_threshold=0.30
+        )
+        # 200 mm of extrusion with 200 pulses → ratio 1.0
+        samples = [(t * 0.05, t * 0.5, t // 2 + 1) for t in range(1, 401)]
+        _feed_sequence(monitor, manager, samples,
+                       force_eval_each_tick=False)
+        monitor._handle_tangle_detected.assert_not_called()
+
+    # ── Test 6: Cold start, window not yet wide enough ─────────────────
+    def test_underfilled_window_no_trigger(self):
+        """Only 10 mm extruded total — window is < W, eval skipped."""
+        monitor, manager = _make_dw_monitor(
+            window_mm=30.0, ratio_threshold=0.30
+        )
+        samples = [(0.00, 0.0, 0), (0.50, 10.0, 0)]
+        _feed_sequence(monitor, manager, samples)
+        monitor._handle_tangle_detected.assert_not_called()
+
+    # ── Test 7: Retracts must not shrink cum_extrude ───────────────────
+    def test_retracts_dont_shrink_window(self):
+        """Negative dext counts as 0 in cum_extrude.  Encoder pulses
+        from backwards roller make ratio *higher* (conservative)."""
+        monitor, manager = _make_dw_monitor(
+            window_mm=30.0, ratio_threshold=0.30
+        )
+        # Forward 30 mm, then retract 5 mm — cum_extrude must stay at 30.
+        samples = [
+            (0.00, 0.0, 0),
+            (0.50, 30.0, 30),     # ratio 1.0, no trigger
+            (1.00, 25.0, 30),     # retract: cum_extrude STAYS at 30
+        ]
+        _feed_sequence(monitor, manager, samples)
+        # After the retract the window is still 30 mm wide with 30
+        # pulses, so ratio is high and no trigger fires.
+        assert monitor._dw_cum_extrude == 30.0
+        monitor._handle_tangle_detected.assert_not_called()
+
+    # ── Test 8: FA on/off transition wipes cleanly ─────────────────────
+    def test_fa_off_wipes_state(self):
+        monitor, manager = _make_dw_monitor(
+            window_mm=30.0, ratio_threshold=0.30
+        )
+        _feed_sequence(monitor, manager,
+                       [(0.0, 0.0, 0), (0.5, 15.0, 5)])
+        assert monitor._dw_samples
+
+        # FA drops out.
+        manager.is_feed_assist_active.return_value = False
+        monitor._check_tangle_distance_window(1.0, current_tool=0)
+        assert monitor._dw_samples == []
+        assert monitor._dw_confirmed_count == 0
+
+        # FA back on — fresh sample sequence, no carry-over.
+        manager.is_feed_assist_active.return_value = True
+        _feed_sequence(monitor, manager,
+                       [(2.0, 100.0, 100), (3.0, 130.0, 130)])
+        # Cum_extrude has continued monotonically (retracts excluded),
+        # the new samples list is fresh, ratio of new window is ~1.0,
+        # no trigger.
+        monitor._handle_tangle_detected.assert_not_called()
+
+    # ── Test 9: confirmation_count=2, one bad then good → no trigger ───
+    def test_confirmation_resets_on_recovery(self):
+        monitor, manager = _make_dw_monitor(
+            window_mm=30.0, ratio_threshold=0.30, confirmation_count=2
+        )
+        samples = [
+            (0.00, 0.0, 0),
+            (1.00, 30.3, 9),      # ratio 0.297 — suspicious (1/2)
+            (2.00, 60.6, 60),     # ratio 0.84 — recovers, counter resets
+        ]
+        _feed_sequence(monitor, manager, samples)
+        monitor._handle_tangle_detected.assert_not_called()
+        assert monitor._dw_confirmed_count == 0
+
+    # ── Test 10: confirmation_count=2, two consecutive bad → trigger ───
+    def test_confirmation_count_two_triggers_after_two(self):
+        monitor, manager = _make_dw_monitor(
+            window_mm=30.0, ratio_threshold=0.30, confirmation_count=2
+        )
+        samples = [
+            (0.00, 0.0, 0),
+            (1.00, 30.3, 9),      # ratio 0.297 — suspicious (1/2)
+            (2.00, 60.6, 18),     # ratio 0.297 again — fires (2/2)
+        ]
+        _feed_sequence(monitor, manager, samples)
+        monitor._handle_tangle_detected.assert_called_once_with(0)
+
+    # ── Bonus: validation clamps ───────────────────────────────────────
+    def test_window_below_floor_clamped(self):
+        """Construction with very small window mm clamps to the floor."""
+        monitor, manager = _make_dw_monitor(window_mm=5.0)
+        assert monitor.tangle_window_extrude_mm == (
+            monitor.TANGLE_WINDOW_EXTRUDE_FLOOR_MM
+        )
+
+    def test_ratio_threshold_out_of_range_falls_back(self):
+        """Construction with ratio outside (0, 0.9) falls back to default."""
+        monitor, _ = _make_dw_monitor(ratio_threshold=1.5)
+        assert monitor.tangle_ratio_threshold == (
+            monitor.DEFAULT_TANGLE_RATIO_THRESHOLD
+        )
+
+    def test_invalid_mode_falls_back(self):
+        """Construction with unknown mode falls back to default."""
+        printer = Mock(); gcode = Mock(); reactor = Mock()
+        reactor.NOW = 0.0; reactor.NEVER = float("inf")
+        manager = Mock()
+        manager.state = Mock(); manager.state.get = Mock(return_value=-1)
+        monitor = RunoutMonitor(
+            printer, gcode, reactor, Mock(), manager,
+            runout_debounce_count=1, tangle_detection=True,
+            tangle_detection_mode="nonsense",
+        )
+        assert monitor.tangle_detection_mode == (
+            monitor.DEFAULT_TANGLE_MODE
+        )

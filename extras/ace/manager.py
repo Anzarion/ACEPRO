@@ -231,6 +231,18 @@ class AceManager:
             runout_debounce_count=self.ace_config.get("runout_debounce_count", 1),
             tangle_detection=self.ace_config.get("tangle_detection", False),
             tangle_detection_length=self.ace_config.get("tangle_detection_length", 15.0),
+            tangle_detection_mode=self.ace_config.get(
+                "tangle_detection_mode", None
+            ),
+            tangle_window_extrude_mm=self.ace_config.get(
+                "tangle_window_extrude_mm", None
+            ),
+            tangle_ratio_threshold=self.ace_config.get(
+                "tangle_ratio_threshold", None
+            ),
+            tangle_confirmation_count=self.ace_config.get(
+                "tangle_confirmation_count", None
+            ),
             tangle_debug=self.ace_config.get("tangle_debug", False),
             tangle_telemetry_log=self.ace_config.get(
                 "tangle_telemetry_log",

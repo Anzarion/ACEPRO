@@ -44,11 +44,29 @@ class RunoutMonitor:
     """
 
     # Default detection length for tangle checking (mm).
+    # Only used by the legacy "simple" mode.
     DEFAULT_TANGLE_DETECTION_LENGTH = 15.0
 
     # How often the tangle check runs (seconds).  250 ms matches the
     # Klipper filament_motion_sensor cadence.
     TANGLE_CHECK_INTERVAL = 0.250
+
+    # ── Distance-window detector defaults ─────────────────────────────
+    # See PLAN-tangle-detection.md for the full rationale.
+    VALID_TANGLE_MODES = ("distance_window", "simple", "off")
+    DEFAULT_TANGLE_MODE = "distance_window"
+    DEFAULT_TANGLE_WINDOW_EXTRUDE_MM = 30.0      # rolling window width
+    DEFAULT_TANGLE_RATIO_THRESHOLD = 0.30        # ppm cutoff
+    DEFAULT_TANGLE_CONFIRMATION_COUNT = 1        # consecutive bad evals
+    # Hard validation floors / ceilings.  Below these the detector
+    # becomes trivially sensitive and would false-positive in normal
+    # ACE-hysteresis stalls; above them it would be effectively off.
+    TANGLE_WINDOW_EXTRUDE_FLOOR_MM = 10.0
+    TANGLE_RATIO_THRESHOLD_MAX = 0.90
+    # Evaluate the window every Nth monitor tick.  4 × 50 ms = 200 ms;
+    # at the smallest reasonable window (10 mm) and typical print
+    # speeds this gives ≥10 evaluations per window — plenty.
+    TANGLE_DW_EVAL_EVERY_N_TICKS = 4
 
     # Theoretical encoder length-per-pulse from the RDM hardware geometry
     # (Kobra-S1/K3M reference).  Used as a comparison anchor in the
@@ -59,6 +77,10 @@ class RunoutMonitor:
     def __init__(self, printer, gcode, reactor, endless_spool, manager,
                  runout_debounce_count=1, tangle_detection=False,
                  tangle_detection_length=None,
+                 tangle_detection_mode=None,
+                 tangle_window_extrude_mm=None,
+                 tangle_ratio_threshold=None,
+                 tangle_confirmation_count=None,
                  tangle_debug=False,
                  tangle_telemetry_log=None):
         """
@@ -117,13 +139,74 @@ class RunoutMonitor:
             tangle_detection_length if tangle_detection_length is not None
             else self.DEFAULT_TANGLE_DETECTION_LENGTH
         )
-        # Extruder position beyond which a tangle is declared
+
+        # Mode selector: distance_window (new, default), simple (legacy,
+        # kept for short Bowdens), off (no detection logic runs).
+        requested_mode = (
+            tangle_detection_mode if tangle_detection_mode is not None
+            else self.DEFAULT_TANGLE_MODE
+        )
+        if requested_mode not in self.VALID_TANGLE_MODES:
+            logging.warning(
+                "ACE: tangle_detection_mode=%r is not one of %s; "
+                "falling back to %r",
+                requested_mode, self.VALID_TANGLE_MODES,
+                self.DEFAULT_TANGLE_MODE,
+            )
+            requested_mode = self.DEFAULT_TANGLE_MODE
+        self.tangle_detection_mode = requested_mode
+
+        # Distance-window parameters with hard floors / ceilings.
+        window_mm = float(
+            tangle_window_extrude_mm if tangle_window_extrude_mm is not None
+            else self.DEFAULT_TANGLE_WINDOW_EXTRUDE_MM
+        )
+        if window_mm < self.TANGLE_WINDOW_EXTRUDE_FLOOR_MM:
+            logging.warning(
+                "ACE: tangle_window_extrude_mm=%.1f below floor %.1f; "
+                "clamping",
+                window_mm, self.TANGLE_WINDOW_EXTRUDE_FLOOR_MM,
+            )
+            window_mm = self.TANGLE_WINDOW_EXTRUDE_FLOOR_MM
+        self.tangle_window_extrude_mm = window_mm
+
+        ratio = float(
+            tangle_ratio_threshold if tangle_ratio_threshold is not None
+            else self.DEFAULT_TANGLE_RATIO_THRESHOLD
+        )
+        if ratio <= 0.0 or ratio >= self.TANGLE_RATIO_THRESHOLD_MAX:
+            logging.warning(
+                "ACE: tangle_ratio_threshold=%.2f outside (0, %.2f); "
+                "falling back to default %.2f",
+                ratio, self.TANGLE_RATIO_THRESHOLD_MAX,
+                self.DEFAULT_TANGLE_RATIO_THRESHOLD,
+            )
+            ratio = self.DEFAULT_TANGLE_RATIO_THRESHOLD
+        self.tangle_ratio_threshold = ratio
+
+        self.tangle_confirmation_count = max(1, int(
+            tangle_confirmation_count
+            if tangle_confirmation_count is not None
+            else self.DEFAULT_TANGLE_CONFIRMATION_COUNT
+        ))
+
+        # Extruder position beyond which a tangle is declared (simple mode)
         self._tangle_runout_pos = None
-        # Encoder pulse snapshot at the time the window was set
+        # Encoder pulse snapshot at the time the window was set (simple mode)
         self._tangle_encoder_snapshot = None
         # Klipper objects resolved at first use
         self._extruder = None
         self._estimated_print_time = None
+
+        # --- Distance-window state ---
+        # Samples: list of (eventtime, cum_extrude_mm, cum_encoder_pulse)
+        # tuples.  We only ever keep enough samples to span tangle_window_
+        # extrude_mm — the oldest entries get popped as the window slides.
+        self._dw_samples = []
+        self._dw_confirmed_count = 0
+        self._dw_cum_extrude = 0.0           # monotonic forward-only sum
+        self._dw_last_extruder_pos = None    # for computing dext per tick
+        self._dw_tick_counter = 0            # for evaluate-every-N gating
 
         # --- Read-only baseline telemetry ---
         self.tangle_debug = bool(tangle_debug)
@@ -577,7 +660,22 @@ class RunoutMonitor:
         self._tangle_encoder_snapshot = encoder_pulse
 
     def _check_tangle(self, eventtime, current_tool):
-        """Check for spool tangle condition.
+        """Dispatcher: route to the configured tangle detection mode.
+
+        The shared pre-conditions (feed-assist active, both sensors
+        present, RDM encoder available) live in the per-mode methods so
+        each can record its own debug breadcrumbs into the telemetry log.
+        """
+        if self.tangle_detection_mode == "off":
+            return
+        if self.tangle_detection_mode == "simple":
+            self._check_tangle_simple(eventtime, current_tool)
+            return
+        # Default + future expansion point.
+        self._check_tangle_distance_window(eventtime, current_tool)
+
+    def _check_tangle_simple(self, eventtime, current_tool):
+        """Legacy point-to-point tangle check.
 
         Tangle is declared when ALL of the following are true:
             1. Print state is "printing" (already guaranteed by caller)
@@ -588,11 +686,8 @@ class RunoutMonitor:
             6. RDM encoder pulse count has NOT changed since last reset
 
         When any condition fails, the detection window is reset so we
-        never accumulate stale state.
-
-        Args:
-            eventtime: Current reactor eventtime.
-            current_tool: Global tool index being printed.
+        never accumulate stale state.  See PLAN-tangle-detection.md
+        section 1 for why this mode is unsuitable for long Bowdens.
         """
         # Condition 2: feed-assist must be active
         if not self.manager.is_feed_assist_active():
@@ -650,6 +745,145 @@ class RunoutMonitor:
             current_encoder,
         )
         self._handle_tangle_detected(current_tool)
+
+    def _dw_wipe_state(self):
+        """Reset the distance-window detector to a clean slate.
+
+        Called whenever a pre-condition fails (FA off, sensor cleared,
+        toolchange starts, runout handling starts) so the window starts
+        fresh when conditions become favourable again — never carries
+        stale samples across a print pause / TC boundary.
+        """
+        self._dw_samples = []
+        self._dw_confirmed_count = 0
+        self._dw_last_extruder_pos = None
+        # cum_extrude stays monotonic across wipes; samples reference
+        # absolute cumulative values, so a fresh samples list will just
+        # start anchoring at the next observed value.
+
+    def _check_tangle_distance_window(self, eventtime, current_tool):
+        """Distance-window tangle detector.
+
+        Triggers when the rolling pulses/mm ratio across the last
+        ``tangle_window_extrude_mm`` mm of forward extrusion drops
+        below ``tangle_ratio_threshold``.  See PLAN-tangle-detection.md
+        for the full rationale.
+
+        Pre-conditions (any False ⇒ wipe state, return):
+            * ACE feed-assist active
+            * RDM detect pin shows filament present
+            * Nozzle sensor shows filament present
+            * RDM encoder readable
+            * Extruder resolvable
+
+        Evaluation happens every TANGLE_DW_EVAL_EVERY_N_TICKS ticks;
+        sample collection runs on every tick so the window timeline
+        stays accurate regardless of the eval cadence.
+        """
+        # ── Pre-conditions ────────────────────────────────────────────
+        if not self.manager.is_feed_assist_active():
+            if self.tangle_debug and self._dw_samples:
+                self._tlm_pending_simple_event = "DW_ABORT:feed_assist_lost"
+            self._dw_wipe_state()
+            return
+        if not self.manager.get_switch_state(SENSOR_RDM):
+            if self.tangle_debug and self._dw_samples:
+                self._tlm_pending_simple_event = "DW_ABORT:rdm_cleared"
+            self._dw_wipe_state()
+            return
+        if not self.manager.get_switch_state(SENSOR_TOOLHEAD):
+            if self.tangle_debug and self._dw_samples:
+                self._tlm_pending_simple_event = "DW_ABORT:toolhead_cleared"
+            self._dw_wipe_state()
+            return
+        current_encoder = self.manager.get_rdm_encoder_pulse()
+        if current_encoder is None:
+            # RDM is not a filament_tracker — cannot run detector
+            return
+        if not self._resolve_extruder():
+            return
+        try:
+            extruder_pos = self._get_extruder_pos(eventtime)
+        except Exception as e:
+            logging.warning(
+                "ACE: distance-window extruder_pos failed: %s", e
+            )
+            return
+
+        # ── Sample collection (every tick) ────────────────────────────
+        # Forward-only summation: retracts contribute zero so they
+        # cannot cancel earlier forward extrusion and accidentally
+        # collapse the window.
+        if self._dw_last_extruder_pos is not None:
+            dext = extruder_pos - self._dw_last_extruder_pos
+            if dext > 0:
+                self._dw_cum_extrude += dext
+        self._dw_last_extruder_pos = extruder_pos
+
+        # Append the new sample.
+        self._dw_samples.append(
+            (eventtime, self._dw_cum_extrude, current_encoder)
+        )
+
+        # Drop oldest samples that fall outside the window.  Keep at
+        # least one sample older than the window's leading edge so the
+        # span is always ≥ tangle_window_extrude_mm when we evaluate.
+        W = self.tangle_window_extrude_mm
+        while (len(self._dw_samples) >= 2
+               and (self._dw_cum_extrude - self._dw_samples[1][1]) >= W):
+            self._dw_samples.pop(0)
+
+        # ── Eval gating ───────────────────────────────────────────────
+        self._dw_tick_counter += 1
+        if self._dw_tick_counter < self.TANGLE_DW_EVAL_EVERY_N_TICKS:
+            return
+        self._dw_tick_counter = 0
+
+        # ── Window evaluation ─────────────────────────────────────────
+        oldest_t, oldest_ext, oldest_enc = self._dw_samples[0]
+        extrude_in_window = self._dw_cum_extrude - oldest_ext
+        if extrude_in_window < W:
+            # Window not yet wide enough — not enough data to judge.
+            return
+
+        pulses_in_window = current_encoder - oldest_enc
+        ratio = pulses_in_window / extrude_in_window
+
+        if self.tangle_debug:
+            logging.debug(
+                "ACE: tangle/dw [T%d] ext=%.1fmm pulses=%d ratio=%.3f "
+                "threshold=%.2f confirmed=%d/%d",
+                current_tool, extrude_in_window, pulses_in_window, ratio,
+                self.tangle_ratio_threshold,
+                self._dw_confirmed_count, self.tangle_confirmation_count,
+            )
+
+        if ratio < self.tangle_ratio_threshold:
+            self._dw_confirmed_count += 1
+            if self.tangle_debug:
+                self._tlm_pending_simple_event = (
+                    "DW_SUSPICIOUS:%d/%d"
+                    % (self._dw_confirmed_count,
+                       self.tangle_confirmation_count)
+                )
+            if self._dw_confirmed_count >= self.tangle_confirmation_count:
+                if self.tangle_debug:
+                    self._tlm_pending_simple_event = "DW_TANGLE_FIRED"
+                logging.warning(
+                    "ACE: TANGLE DETECTED (distance_window) on T%d — "
+                    "%.1fmm extruded with only %d encoder pulses "
+                    "(ratio %.3f < threshold %.2f, confirmed %dx)",
+                    current_tool, extrude_in_window, pulses_in_window,
+                    ratio, self.tangle_ratio_threshold,
+                    self._dw_confirmed_count,
+                )
+                self._dw_wipe_state()
+                self._handle_tangle_detected(current_tool)
+        else:
+            # Ratio recovered — reset the confirmation counter.
+            if self._dw_confirmed_count > 0 and self.tangle_debug:
+                self._tlm_pending_simple_event = "DW_RECOVERED"
+            self._dw_confirmed_count = 0
 
     def _handle_tangle_detected(self, tool_index):
         """Handle a confirmed spool tangle.
