@@ -798,18 +798,18 @@ class RunoutMonitor:
             dir_path = os.path.dirname(path)
             if dir_path:
                 os.makedirs(dir_path, exist_ok=True)
-            # Line-buffered append mode so tail records survive a
-            # printer crash mid-write.
-            self._tlm_file_handle = open(path, "a", buffering=1)
-            self._tlm_file_handle.seek(0, os.SEEK_END)
-            if self._tlm_file_handle.tell() == 0:
-                self._tlm_file_handle.write(
-                    "# ACE tangle baseline telemetry — read-only, "
-                    "no detection logic\n"
-                    "# Columns: eventtime tool encoder_pulse extruder_pos "
-                    "d_encoder d_extruder print_state feed_assist rdm "
-                    "toolhead simple_event\n"
-                )
+            # Truncate on open so each Klipper session starts with a fresh
+            # file — accumulated multi-session logs are useless for analysis
+            # and the file would otherwise grow unbounded across restarts.
+            # Line-buffered so tail records survive a crash mid-write.
+            self._tlm_file_handle = open(path, "w", buffering=1)
+            self._tlm_file_handle.write(
+                "# ACE tangle baseline telemetry — read-only, "
+                "no detection logic\n"
+                "# Columns: eventtime tool encoder_pulse extruder_pos "
+                "d_encoder d_extruder print_state feed_assist rdm "
+                "toolhead simple_event\n"
+            )
             self._tlm_resolved_log_path = path
             return True
         except Exception as e:

@@ -759,6 +759,30 @@ class TestTangleTelemetry:
         # Another tick must still not crash (file output already disabled).
         monitor._log_tangle_telemetry(0.50, current_tool=0)
 
+    def test_log_file_truncated_on_each_session(self, tmp_path):
+        """Each new monitor (= Klipper restart) starts with a fresh file —
+        accumulated multi-session bloat is undesirable for analysis and
+        the file would otherwise grow unbounded across restarts."""
+        log_path = str(tmp_path / "ace-tangle-telemetry.log")
+
+        # Session 1: write three rows.
+        monitor1, manager1, _ = _make_telemetry_monitor(tmp_path)
+        monitor1._get_extruder_pos = Mock(return_value=10.0)
+        for t in (0.25, 0.50, 0.75):
+            monitor1._log_tangle_telemetry(t, current_tool=0)
+        assert len(_data_rows(log_path)) == 3
+        # Simulate Klipper shutdown — release the file handle.
+        monitor1._tlm_file_handle.close()
+        monitor1._tlm_file_handle = None
+
+        # Session 2 on the same path starts fresh.
+        monitor2, manager2, _ = _make_telemetry_monitor(tmp_path)
+        monitor2._get_extruder_pos = Mock(return_value=20.0)
+        monitor2._log_tangle_telemetry(0.25, current_tool=0)
+
+        # File was truncated — only session 2's single row remains.
+        assert len(_data_rows(log_path)) == 1
+
     # ── Gating on feed_assist ────────────────────────────────────────────
 
     def test_idle_ticks_skipped_when_feed_assist_inactive(self, tmp_path):
