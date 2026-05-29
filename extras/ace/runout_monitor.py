@@ -894,7 +894,7 @@ class RunoutMonitor:
                 "no detection logic\n"
                 "# Columns: eventtime tool encoder_pulse extruder_pos "
                 "d_encoder d_extruder print_state feed_assist rdm "
-                "toolhead simple_event layer\n"
+                "toolhead simple_event layer toolchange filament_pos\n"
             )
             self._tlm_resolved_log_path = path
             return True
@@ -1019,6 +1019,24 @@ class RunoutMonitor:
         except Exception:
             pass
 
+        # ---- Toolchange + filament position ----
+        # toolchange_in_progress is set by the @toolchange_in_progress_guard
+        # decorator around AceManager methods that move filament; while it
+        # is True the runout monitor early-exits anyway, but having it in
+        # the TSV lets us correlate stalls / encoder anomalies with the
+        # tail of a TC sequence.  filament_pos tracks where the filament
+        # currently lives (bowden / splitter / toolhead / nozzle) — this
+        # changes the encoder's expected behaviour completely.
+        try:
+            toolchange = 1 if self.manager.toolchange_in_progress else 0
+        except Exception:
+            toolchange = 0
+        try:
+            fpos = self.manager.state.get("ace_filament_pos", None)
+            filament_pos = str(fpos) if fpos is not None else "-"
+        except Exception:
+            filament_pos = "-"
+
         # ---- Deltas ----
         if self._tlm_last_encoder is None or encoder_value < 0:
             d_encoder = 0
@@ -1043,7 +1061,8 @@ class RunoutMonitor:
                     f"{eventtime:.3f}\t{current_tool}\t{encoder_value}\t"
                     f"{extruder_pos:.3f}\t{d_encoder}\t{d_extruder:.3f}\t"
                     f"{print_state}\t{feed_assist}\t{rdm}\t{toolhead}\t"
-                    f"{simple_event}\t{current_layer}\n"
+                    f"{simple_event}\t{current_layer}\t"
+                    f"{toolchange}\t{filament_pos}\n"
                 )
             except Exception as e:
                 logging.warning(

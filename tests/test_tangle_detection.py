@@ -933,6 +933,73 @@ class TestLayerColumn:
 
 
 # ─────────────────────────────────────────────────────────────────────────
+# Toolchange + filament_pos columns
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class TestToolchangeAndFilamentPosColumns:
+    """Two new TSV columns (13: toolchange, 14: filament_pos) let later
+    analysis correlate stalls with the ACE filament-path state and TC
+    sequences.  Both are read best-effort and fall back to defaults if
+    the manager state is empty."""
+
+    def test_toolchange_column_one_when_in_progress(self, tmp_path):
+        monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
+        monitor._get_extruder_pos = Mock(return_value=10.0)
+        manager.toolchange_in_progress = True
+
+        monitor._log_tangle_telemetry(0.25, current_tool=0)
+
+        cols = _data_rows(log_path)[0].split("\t")
+        assert cols[12] == "1", f"toolchange column: {cols}"
+
+    def test_toolchange_column_zero_when_idle(self, tmp_path):
+        monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
+        monitor._get_extruder_pos = Mock(return_value=10.0)
+        manager.toolchange_in_progress = False
+
+        monitor._log_tangle_telemetry(0.25, current_tool=0)
+
+        cols = _data_rows(log_path)[0].split("\t")
+        assert cols[12] == "0", f"toolchange column: {cols}"
+
+    def test_filament_pos_column_carries_state(self, tmp_path):
+        monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
+        monitor._get_extruder_pos = Mock(return_value=10.0)
+        manager.state.get = lambda key, default=None: (
+            "nozzle" if key == "ace_filament_pos" else default
+        )
+
+        monitor._log_tangle_telemetry(0.25, current_tool=0)
+
+        cols = _data_rows(log_path)[0].split("\t")
+        assert cols[13] == "nozzle", f"filament_pos column: {cols}"
+
+    def test_filament_pos_dash_when_unset(self, tmp_path):
+        """When ace_filament_pos has never been written it returns
+        None — TSV should show '-' for consistency with the layer
+        column's empty fallback."""
+        monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
+        monitor._get_extruder_pos = Mock(return_value=10.0)
+        manager.state.get = lambda key, default=None: default
+
+        monitor._log_tangle_telemetry(0.25, current_tool=0)
+
+        cols = _data_rows(log_path)[0].split("\t")
+        assert cols[13] == "-", f"filament_pos column: {cols}"
+
+    def test_new_columns_in_header(self, tmp_path):
+        monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
+        monitor._get_extruder_pos = Mock(return_value=10.0)
+        monitor._log_tangle_telemetry(0.25, current_tool=0)
+
+        with open(log_path) as f:
+            header = f.read().split("\n")[1]
+        assert "toolchange" in header
+        assert "filament_pos" in header
+
+
+# ─────────────────────────────────────────────────────────────────────────
 # TANGLE_TELEMETRY_MARK — model-start anchor
 # ─────────────────────────────────────────────────────────────────────────
 
