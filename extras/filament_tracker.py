@@ -191,6 +191,34 @@ class FilamentTracker:
             self._last_gpio_state = 0
             self._absence_timer = None
 
+            # High-resolution edge counter for the encoder pin.  The
+            # buttons module polls at ~40 Hz with 25 ms debouncing —
+            # adequate for a switch but too coarse for an optical
+            # encoder, which can produce hundreds of edges per second
+            # at print speeds.  pulse_counter.MCU_counter uses MCU-level
+            # interrupts to catch every edge regardless of rate.
+            #
+            # The buttons handler still runs for filament-present logic
+            # (debounced detect-pin + absence timer).  Only the pulse
+            # COUNT moves to MCU_counter.
+            try:
+                from . import pulse_counter as _pulse_counter_mod
+                self._mcu_counter = _pulse_counter_mod.MCU_counter(
+                    self.printer, self.encoder_pin,
+                    sample_time=0.05, poll_time=0.001,
+                )
+                self._mcu_counter.setup_callback(self._on_mcu_count)
+                self._mcu_counter_last_count = 0
+            except Exception as e:
+                # If pulse_counter is unavailable (test stubs, exotic
+                # build) fall back to buttons-counting silently — the
+                # tracker still works, just with the old polling limit.
+                logging.warning(
+                    "filament_tracker: pulse_counter unavailable (%s) — "
+                    "falling back to buttons-only edge counting", e)
+                self._mcu_counter = None
+                self._mcu_counter_last_count = 0
+
         if self._motion_detection_enabled:
             self.printer.register_event_handler(
                 'klippy:ready', self._handle_ready)
@@ -362,6 +390,26 @@ class FilamentTracker:
             if not self._detect_pin_is_switch:
                 self.runout_helper.note_filament_present(eventtime, True)
 
+    def _on_mcu_count(self, time, count, count_time):
+        """High-resolution edge count from pulse_counter.MCU_counter.
+
+        Authoritative source for ``tracker_status.encoder_pulse`` on
+        the GPIO path.  Fires roughly every ``sample_time`` (50 ms)
+        whenever the MCU reports new edges — the count value is the
+        cumulative total (with 32-bit overflow already handled by
+        MCU_counter).
+
+        We skip ticks with zero delta to avoid spurious motion-detection
+        resets when no edges actually arrived.
+        """
+        delta = count - self._mcu_counter_last_count
+        if delta <= 0:
+            return
+        self._mcu_counter_last_count = count
+        self.tracker_status.encoder_pulse = count
+        self._last_edge_time = time
+        self._on_encoder_pulse(time)
+
     def _trace_enabled(self, present_int):
         """Log a filament presence transition (only bound when debug_trace is on)."""
         logging.info(
@@ -466,15 +514,28 @@ class FilamentTracker:
         In switch mode (``detect_pin_is_switch``), bit 0 alone determines
         presence.  In dual-encoder mode, any edge latches present;
         both-zero starts a delayed absence timer.
+
+        The authoritative encoder pulse count comes from MCU_counter
+        (see _on_mcu_count) which catches every edge regardless of
+        rate.  The buttons-module polling cannot — at print speeds the
+        encoder produces more edges per second than the 40 Hz polling
+        + 25 ms debounce can track.  We still read the encoder bit
+        here for signal_state reporting and the presence/absence
+        logic, but we do NOT increment encoder_pulse on the buttons
+        path — that would double-count when MCU_counter is also
+        active, and would undercount when MCU_counter is absent.
         """
-        # Count encoder edges from the encoder bit
         encoder_bit = (state_bits >> 1) & 1
         last_encoder_bit = (self._last_gpio_state >> 1) & 1
         if encoder_bit != last_encoder_bit:
             self.tracker_status.encoder_signal_state = encoder_bit
-            self.tracker_status.encoder_pulse += 1
-            self._last_edge_time = eventtime
-            self._on_encoder_pulse(eventtime)
+            # Fallback path: if MCU_counter is unavailable, count
+            # buttons-edges so the tracker still produces *some*
+            # pulse data, even if rate-limited.
+            if self._mcu_counter is None:
+                self.tracker_status.encoder_pulse += 1
+                self._last_edge_time = eventtime
+                self._on_encoder_pulse(eventtime)
         self._last_gpio_state = state_bits
 
         if self._detect_pin_is_switch:
