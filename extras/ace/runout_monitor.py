@@ -391,8 +391,17 @@ class RunoutMonitor:
                     f"(sensor: {current_sensor_state}, tool: T{current_tool})"
                 )
 
-        # Early exit if detection disabled or toolchange in progress
+        # Early exit if detection disabled or toolchange in progress.
+        # Before exiting we still emit a telemetry tick so the TSV
+        # captures the TC / detection-off interval — otherwise long
+        # toolchange sequences (60-90 s of filament movement) leave a
+        # gap in the log and the toolchange=1 marker is never written.
         if not self.runout_detection_active or self.manager.toolchange_in_progress:
+            if self.tangle_debug and not self.runout_handling_in_progress:
+                try:
+                    self._log_tangle_telemetry(eventtime, current_tool)
+                except Exception as e:
+                    logging.warning("ACE: tangle telemetry error: %s", e)
             self._tangle_runout_pos = None
             return eventtime + 0.2
 
