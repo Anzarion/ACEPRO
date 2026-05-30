@@ -202,6 +202,22 @@ def read_ace_config(config):
     ace_config["tangle_detection_length"] = config.getfloat(
         "tangle_detection_length", 15.0
     )
+    # Distance-window detector parameters (the new default mode).  See
+    # PLAN-tangle-detection.md for the rationale and config/voron/
+    # acepro_setting.cfg for user-facing documentation.  RunoutMonitor
+    # has its own validation (clamp / fallback) for out-of-range values.
+    ace_config["tangle_detection_mode"] = config.get(
+        "tangle_detection_mode", "distance_window"
+    )
+    ace_config["tangle_window_extrude_mm"] = config.getfloat(
+        "tangle_window_extrude_mm", 30.0
+    )
+    ace_config["tangle_ratio_threshold"] = config.getfloat(
+        "tangle_ratio_threshold", 0.30
+    )
+    ace_config["tangle_confirmation_count"] = config.getint(
+        "tangle_confirmation_count", 1
+    )
     # Read-only baseline telemetry — when enabled, the runout monitor logs
     # raw encoder / extruder values every tick to help characterise the
     # behaviour of the simple tangle detector before changing its logic.
