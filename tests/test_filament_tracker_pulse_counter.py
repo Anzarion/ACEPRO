@@ -234,12 +234,24 @@ class TestOnMcuCount:
 
     def test_nonzero_delta_calls_on_encoder_pulse(self):
         """Real edges must trigger _on_encoder_pulse so filament_distance
-        is recomputed and motion-detection state advances."""
+        is recomputed and motion-detection state advances.
+
+        The argument passed must be a reactor monotonic time (not the
+        MCU print_time from the pulse_counter callback), otherwise
+        downstream _get_extruder_pos crashes with OverflowError in
+        stepcompress_find_past_position when it does
+        _estimated_print_time(eventtime) on what is already a print_time.
+        """
         tracker, _ = _make_tracker(signal_type="gpio")
         tracker._on_encoder_pulse = Mock()
+        # Inject a known reactor monotonic value via the mock reactor.
+        tracker.reactor.monotonic = Mock(return_value=42.0)
+
         tracker._on_mcu_count(time=1.0, count=5, count_time=1.0)
 
-        tracker._on_encoder_pulse.assert_called_once_with(1.0)
+        # Called with reactor monotonic, NOT the MCU time argument.
+        tracker._on_encoder_pulse.assert_called_once_with(42.0)
+        assert tracker._last_edge_time == 42.0
 
     def test_filament_distance_recomputed_after_count_update(self):
         """encoder_pulse × length_per_pulse must show through."""

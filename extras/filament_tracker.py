@@ -413,14 +413,28 @@ class FilamentTracker:
 
         We skip ticks with zero delta to avoid spurious motion-detection
         resets when no edges actually arrived.
+
+        IMPORTANT — coordinate-system mismatch fix:
+        ``time`` from pulse_counter is the MCU print_time (clock_to_print_time
+        conversion).  Downstream methods like ``_update_filament_runout_pos``
+        eventually feed their argument into ``_estimated_print_time(eventtime)``
+        which expects a REACTOR monotonic time and converts it BACK to
+        print_time.  Passing MCU-print_time as if it were reactor time
+        results in double-conversion → negative MCU clocks → OverflowError
+        inside the C extension ``stepcompress_find_past_position``.
+
+        Use the reactor's current monotonic time for downstream calls.
+        It is at most a few ms older than the MCU print_time and well
+        within tolerance for filament-distance / runout-window updates.
         """
         delta = count - self._mcu_counter_last_count
         if delta <= 0:
             return
         self._mcu_counter_last_count = count
         self.tracker_status.encoder_pulse = count
-        self._last_edge_time = time
-        self._on_encoder_pulse(time)
+        eventtime = self.reactor.monotonic()
+        self._last_edge_time = eventtime
+        self._on_encoder_pulse(eventtime)
 
     def _trace_enabled(self, present_int):
         """Log a filament presence transition (only bound when debug_trace is on)."""
