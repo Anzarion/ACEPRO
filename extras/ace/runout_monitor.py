@@ -1332,7 +1332,13 @@ class RunoutMonitor:
             per_s_extr = (
                 self._tlm_bucket_d_extruder / elapsed if elapsed > 0 else 0
             )
-            logging.info(
+            # Demoted from info to debug: this was useful when we had no
+            # TSV output, but now the per-tick TSV is the source of
+            # truth.  Emitting this every second during a long print
+            # spams klippy.log with ~1440 lines per 24-minute print.
+            # Re-enable by setting verbose: True on the [logger] config
+            # or with `--debug` if you really want it back.
+            logging.debug(
                 "ACE: tangle-tlm T%d enc=%d extr=%.1fmm "
                 "%senc/s=%.1f %sextr/s=%.2fmm fa=%d rdm=%d th=%d",
                 current_tool, encoder_value, extruder_pos,

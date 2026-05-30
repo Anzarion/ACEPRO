@@ -728,10 +728,14 @@ class TestTangleTelemetry:
         assert cols[2] == "-1"
 
     def test_klippy_summary_emitted_after_one_second(self, tmp_path, caplog):
+        """The 1-second aggregated klippy.log summary lives at DEBUG
+        level (was INFO until it was found to spam klippy.log with ~1440
+        lines per 24-minute print).  Capture at DEBUG to verify it still
+        fires when explicitly enabled."""
         monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
         monitor._get_extruder_pos = Mock(return_value=10.0)
 
-        with caplog.at_level("INFO"):
+        with caplog.at_level("DEBUG"):
             monitor._log_tangle_telemetry(0.25, current_tool=0)
             monitor._log_tangle_telemetry(1.50, current_tool=0)  # >= 1s later
 
