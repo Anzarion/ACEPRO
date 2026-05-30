@@ -256,28 +256,35 @@ class TestOnMcuCount:
 # ─────────────────────────────────────────────────────────────────────────
 
 
-class TestGpioHandlerNoDoubleCount:
-    """When MCU_counter is active, the buttons-path must not also
-    increment encoder_pulse — that would double the count."""
+class TestGpioHandlerEncoderIsolation:
+    """With strict pin separation, the GPIO handler only sees the
+    detect_pin — encoder bits are not in the state_bits anymore, and
+    encoder_pulse is updated exclusively by _on_mcu_count."""
 
-    def test_gpio_handler_does_not_increment_when_mcu_counter_present(self):
+    def test_gpio_handler_never_increments_encoder_pulse(self):
+        """The buttons handler must never touch encoder_pulse — that
+        is owned entirely by pulse_counter.MCU_counter now.  Even if
+        the test injects what used to be an "encoder bit", the handler
+        ignores it (the encoder pin isn't registered with buttons
+        anymore on production)."""
         tracker, _ = _make_tracker(signal_type="gpio")
         assert tracker._mcu_counter is not None  # sanity
         assert tracker.tracker_status.encoder_pulse == 0
 
-        # Simulate a buttons-edge: encoder bit toggles 0 → 1.
+        # Anything we feed via _gpio_handler is treated as detect-pin
+        # state.  Pulse count stays at zero.
         tracker._last_gpio_state = 0b00
         tracker._gpio_handler(eventtime=1.0, state_bits=0b10)
+        tracker._gpio_handler(eventtime=1.1, state_bits=0b00)
+        tracker._gpio_handler(eventtime=1.2, state_bits=0b01)
 
-        # encoder_signal_state tracks the edge for telemetry…
-        assert tracker.tracker_status.encoder_signal_state == 1
-        # …but encoder_pulse is left alone — MCU_counter owns it.
         assert tracker.tracker_status.encoder_pulse == 0
 
-    def test_gpio_handler_increments_when_mcu_counter_absent(self):
-        """Fallback path: pulse_counter unavailable → buttons-handler
-        is the only source of pulses, so it must increment."""
-        # Build a tracker, then forcibly drop the MCU counter.
+    def test_no_fallback_when_mcu_counter_absent(self):
+        """When pulse_counter fails to construct, encoder_pulse stays
+        at 0 — there is no buttons-based fallback (would require the
+        encoder pin to be claimed by buttons, which is exactly the
+        dual-claim configuration we removed)."""
         tracker, _ = _make_tracker(signal_type="gpio")
         tracker._mcu_counter = None
         tracker.tracker_status.encoder_pulse = 0
@@ -285,7 +292,8 @@ class TestGpioHandlerNoDoubleCount:
         tracker._last_gpio_state = 0b00
         tracker._gpio_handler(eventtime=1.0, state_bits=0b10)
 
-        assert tracker.tracker_status.encoder_pulse == 1
+        # Still zero — no fallback path on the encoder side.
+        assert tracker.tracker_status.encoder_pulse == 0
 
 
 # ─────────────────────────────────────────────────────────────────────────

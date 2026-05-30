@@ -185,22 +185,27 @@ class FilamentTracker:
             self._encoder_adc_pin.setup_adc_sample(ADC_SAMPLE_TIME, ADC_SAMPLE_COUNT)
             self._encoder_adc_pin.setup_adc_callback(ADC_REPORT_TIME, self._encoder_adc_handler)
         else:
+            # ── Pin ownership: strict separation ──────────────────────
+            # detect_pin  → buttons module (Switch, debounced — perfect
+            #               fit for a mechanical/Hall switch)
+            # encoder_pin → pulse_counter EXCLUSIVELY (hardware-interrupt
+            #               edge counter, no polling limit)
+            #
+            # Earlier versions claimed BOTH pins via buttons.register_buttons
+            # AND parallel pulse_counter on the encoder pin.  Empirically
+            # that dual-claim caused pulse_counter to fall silent during
+            # prints on some Klipper builds — the buttons module's pin
+            # state machine and pulse_counter's MCU-side counter were
+            # apparently competing on the same pin.
+            #
+            # Strict separation here: buttons owns detect_pin only,
+            # pulse_counter owns encoder_pin only.  No cross-talk.
             buttons = self.printer.load_object(config, "buttons")
-            buttons.register_buttons([self.detect_pin, self.encoder_pin],
+            buttons.register_buttons([self.detect_pin],
                                      self._gpio_handler)
             self._last_gpio_state = 0
             self._absence_timer = None
 
-            # High-resolution edge counter for the encoder pin.  The
-            # buttons module polls at ~40 Hz with 25 ms debouncing —
-            # adequate for a switch but too coarse for an optical
-            # encoder, which can produce hundreds of edges per second
-            # at print speeds.  pulse_counter.MCU_counter uses MCU-level
-            # interrupts to catch every edge regardless of rate.
-            #
-            # The buttons handler still runs for filament-present logic
-            # (debounced detect-pin + absence timer).  Only the pulse
-            # COUNT moves to MCU_counter.
             try:
                 from . import pulse_counter as _pulse_counter_mod
                 self._mcu_counter = _pulse_counter_mod.MCU_counter(
@@ -211,11 +216,18 @@ class FilamentTracker:
                 self._mcu_counter_last_count = 0
             except Exception as e:
                 # If pulse_counter is unavailable (test stubs, exotic
-                # build) fall back to buttons-counting silently — the
-                # tracker still works, just with the old polling limit.
-                logging.warning(
-                    "filament_tracker: pulse_counter unavailable (%s) — "
-                    "falling back to buttons-only edge counting", e)
+                # build) the encoder is non-functional.  Log loudly,
+                # leave _mcu_counter as None.  No automatic fallback to
+                # buttons on the encoder pin — that was the source of
+                # the dual-claim problem we just fixed.  Users that hit
+                # this must either install pulse_counter (it's Klipper
+                # standard for years) or set tangle_detection: False.
+                logging.error(
+                    "filament_tracker: pulse_counter UNAVAILABLE (%s). "
+                    "Encoder pulse counting is DISABLED.  Tangle "
+                    "detection will not work.  Install pulse_counter "
+                    "(standard Klipper module) or set "
+                    "tangle_detection: False in [ace].", e)
                 self._mcu_counter = None
                 self._mcu_counter_last_count = 0
 
@@ -505,37 +517,27 @@ class FilamentTracker:
 
     # GPIO path
     def _gpio_handler(self, eventtime, state_bits):
-        """GPIO callback receiving a bitmask of both pins.
+        """GPIO callback for the detect_pin (only).
 
         Args:
             eventtime: Monotonic timestamp of the event.
-            state_bits: Bitmask — bit 0 = detect pin, bit 1 = encoder pin.
+            state_bits: Bitmask — bit 0 = detect pin.  No encoder bit
+                here anymore: encoder_pin is owned exclusively by
+                pulse_counter.MCU_counter via _on_mcu_count.
 
-        In switch mode (``detect_pin_is_switch``), bit 0 alone determines
-        presence.  In dual-encoder mode, any edge latches present;
-        both-zero starts a delayed absence timer.
+        In switch mode (``detect_pin_is_switch``), bit 0 alone
+        determines presence — the switch is authoritative.
 
-        The authoritative encoder pulse count comes from MCU_counter
-        (see _on_mcu_count) which catches every edge regardless of
-        rate.  The buttons-module polling cannot — at print speeds the
-        encoder produces more edges per second than the 40 Hz polling
-        + 25 ms debounce can track.  We still read the encoder bit
-        here for signal_state reporting and the presence/absence
-        logic, but we do NOT increment encoder_pulse on the buttons
-        path — that would double-count when MCU_counter is also
-        active, and would undercount when MCU_counter is absent.
+        In dual-encoder mode without the encoder bit, we lean on
+        MCU_counter for "movement detected" via _on_encoder_pulse →
+        _note_filament_present(1).  When the detect pin goes low for
+        longer than absence_timeout AND no encoder pulse has arrived,
+        _gpio_absence_event flips presence to 0.
+
+        Note: tracker_status.encoder_signal_state used to be updated
+        from the encoder bit here.  It's no longer maintained — was
+        only ever a debug/display field.
         """
-        encoder_bit = (state_bits >> 1) & 1
-        last_encoder_bit = (self._last_gpio_state >> 1) & 1
-        if encoder_bit != last_encoder_bit:
-            self.tracker_status.encoder_signal_state = encoder_bit
-            # Fallback path: if MCU_counter is unavailable, count
-            # buttons-edges so the tracker still produces *some*
-            # pulse data, even if rate-limited.
-            if self._mcu_counter is None:
-                self.tracker_status.encoder_pulse += 1
-                self._last_edge_time = eventtime
-                self._on_encoder_pulse(eventtime)
         self._last_gpio_state = state_bits
 
         if self._detect_pin_is_switch:
@@ -546,15 +548,17 @@ class FilamentTracker:
             else:
                 self._note_filament_present(0, eventtime)
         else:
-            # Dual-encoder mode
-            if state_bits:
-                # At least one channel active → filament present
+            # Dual-encoder mode (detect-pin half)
+            if state_bits & 1:
+                # Detect bit active → filament present
                 self._note_filament_present(1, eventtime)
                 if self._absence_timer is not None:
                     self.reactor.update_timer(self._absence_timer,
                                               self.reactor.NEVER)
             else:
-                # Both channels open — schedule delayed absence check
+                # Detect bit clear — schedule delayed absence check.
+                # MCU_counter callbacks (_on_mcu_count) also reset the
+                # absence timer when fresh encoder pulses arrive.
                 if self._absence_timer is None:
                     self._absence_timer = self.reactor.register_timer(
                         self._gpio_absence_event)
