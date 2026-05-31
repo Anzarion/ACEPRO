@@ -1028,8 +1028,7 @@ class TestDiagnosticParallelSignals:
         monitor._get_extruder_pos = Mock(return_value=10.0)
         inst = Mock()
         inst._feed_assist_index = 0
-        inst.serial_mgr = Mock()
-        inst.serial_mgr.last_action = "feeding"
+        inst._info = {"action": "feeding", "status": "busy"}
         manager.instances = [inst]
 
         monitor._log_tangle_telemetry(0.25, current_tool=0)
@@ -1046,6 +1045,21 @@ class TestDiagnosticParallelSignals:
 
         cols = _data_rows(log_path)[0].split("\t")
         assert cols[14] == "-", f"ace_action column: {cols}"
+
+    def test_ace_action_falls_back_to_idle_instance(self, tmp_path):
+        """When no instance has feed_assist active, use whatever any
+        instance's _info reports."""
+        monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
+        monitor._get_extruder_pos = Mock(return_value=10.0)
+        inst = Mock()
+        inst._feed_assist_index = -1  # not feeding
+        inst._info = {"action": "none", "status": "ready"}
+        manager.instances = [inst]
+
+        monitor._log_tangle_telemetry(0.25, current_tool=0)
+
+        cols = _data_rows(log_path)[0].split("\t")
+        assert cols[14] == "none", f"ace_action column: {cols}"
 
     def test_mcu_count_raw_column_reads_tracker(self, tmp_path):
         monitor, manager, log_path = _make_telemetry_monitor(tmp_path)

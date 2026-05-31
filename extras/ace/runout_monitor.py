@@ -1114,28 +1114,29 @@ class RunoutMonitor:
     def _get_ace_action(self):
         """Return the ACE-reported `action` field for the active instance.
 
-        Reads `serial_mgr.last_action` (set by `_status_update_callback`)
-        from the first instance whose feed_assist is active.  Returns the
-        literal device value ("none"/"feeding"/"busy"/...) or "-" if no
-        instance is currently feeding / no value cached yet.
+        Reads from `instance._info` (the most recent heartbeat result,
+        updated unconditionally by AceInstance._status_update_callback) —
+        NOT from `serial_mgr.last_action`, which is gated behind
+        `status_debug_logging` and stays None in normal operation.
 
-        Diagnostic-only; never raises.
+        Prefers instances whose feed_assist is active.  Returns the
+        literal device value ("none"/"feeding"/"busy"/...) or "-" if no
+        instance has reported yet.  Diagnostic-only; never raises.
         """
         try:
             instances = getattr(self.manager, "instances", None) or []
+            # Prefer the feed-assist-active instance
             for inst in instances:
                 if getattr(inst, "_feed_assist_index", -1) < 0:
                     continue
-                serial_mgr = getattr(inst, "serial_mgr", None)
-                if serial_mgr is None:
-                    continue
-                action = getattr(serial_mgr, "last_action", None)
+                info = getattr(inst, "_info", None) or {}
+                action = info.get("action") if isinstance(info, dict) else None
                 if action:
                     return str(action)
-            # Fallback: first instance with a cached action
+            # Fallback: first instance with any _info action
             for inst in instances:
-                serial_mgr = getattr(inst, "serial_mgr", None)
-                action = getattr(serial_mgr, "last_action", None) if serial_mgr else None
+                info = getattr(inst, "_info", None) or {}
+                action = info.get("action") if isinstance(info, dict) else None
                 if action:
                     return str(action)
         except Exception:
