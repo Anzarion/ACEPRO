@@ -1012,6 +1012,183 @@ class TestToolchangeAndFilamentPosColumns:
 
 
 # ─────────────────────────────────────────────────────────────────────────
+# Diagnostic parallel signals (ace_action, mcu_count_raw, ext_pwm)
+# + silence-phase markers.  Added 2026-05-31 to root-cause encoder-silent
+# stretches in baseline runs (see PLAN-tangle-detection.md).
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class TestDiagnosticParallelSignals:
+    """Three new TSV columns (15: ace_action, 16: mcu_count_raw, 17: ext_pwm)
+    plus klippy.log SILENCE_START/END markers for correlating encoder
+    silence with concurrent ACE / MCU / heater activity."""
+
+    def test_ace_action_column_reflects_active_instance(self, tmp_path):
+        monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
+        monitor._get_extruder_pos = Mock(return_value=10.0)
+        inst = Mock()
+        inst._feed_assist_index = 0
+        inst.serial_mgr = Mock()
+        inst.serial_mgr.last_action = "feeding"
+        manager.instances = [inst]
+
+        monitor._log_tangle_telemetry(0.25, current_tool=0)
+
+        cols = _data_rows(log_path)[0].split("\t")
+        assert cols[14] == "feeding", f"ace_action column: {cols}"
+
+    def test_ace_action_column_dash_when_no_instance(self, tmp_path):
+        monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
+        monitor._get_extruder_pos = Mock(return_value=10.0)
+        manager.instances = []
+
+        monitor._log_tangle_telemetry(0.25, current_tool=0)
+
+        cols = _data_rows(log_path)[0].split("\t")
+        assert cols[14] == "-", f"ace_action column: {cols}"
+
+    def test_mcu_count_raw_column_reads_tracker(self, tmp_path):
+        monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
+        monitor._get_extruder_pos = Mock(return_value=10.0)
+        rdm = Mock()
+        rdm._tracker = Mock()
+        rdm._tracker._mcu_counter_last_count = 12345
+        manager.sensors = {SENSOR_RDM: rdm}
+
+        monitor._log_tangle_telemetry(0.25, current_tool=0)
+
+        cols = _data_rows(log_path)[0].split("\t")
+        assert cols[15] == "12345", f"mcu_count_raw column: {cols}"
+
+    def test_ext_pwm_column_reads_extruder_power(self, tmp_path):
+        monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
+        monitor._get_extruder_pos = Mock(return_value=10.0)
+        ext = Mock()
+        ext.get_status.return_value = {"power": 0.42, "temperature": 250.0}
+        monitor.printer.lookup_object = Mock(return_value=ext)
+
+        monitor._log_tangle_telemetry(0.25, current_tool=0)
+
+        cols = _data_rows(log_path)[0].split("\t")
+        assert cols[16] == "0.42", f"ext_pwm column: {cols}"
+
+    def test_header_includes_new_columns(self, tmp_path):
+        monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
+        monitor._get_extruder_pos = Mock(return_value=10.0)
+        monitor._log_tangle_telemetry(0.25, current_tool=0)
+
+        with open(log_path) as f:
+            header = f.read().split("\n")[1]
+        for col in ("ace_action", "mcu_count_raw", "ext_pwm"):
+            assert col in header, f"missing column {col} in header: {header}"
+
+
+class TestSilenceMarkers:
+    """SILENCE_START / SILENCE_END are emitted to klippy.log when the
+    encoder stays at d_encoder=0 for SILENCE_THRESHOLD_S while feed_assist
+    is on and print_state is 'printing'.  These markers are the anchor
+    for offline post-print correlation analysis."""
+
+    def _setup_printing_state(self, monitor, manager):
+        monitor._get_extruder_pos = Mock(return_value=10.0)
+        manager.is_feed_assist_active.return_value = True
+        manager.get_switch_state.return_value = True
+        monitor.last_print_state = "printing"
+
+    def test_no_marker_below_threshold(self, tmp_path):
+        monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
+        self._setup_printing_state(monitor, manager)
+        # Encoder static; consecutive ticks under threshold.
+        manager.get_rdm_encoder_pulse.return_value = 100
+
+        for t in (0.05, 1.0, 2.0):  # 1.95s total — under 3s threshold
+            monitor._log_tangle_telemetry(t, current_tool=0)
+
+        respond_calls = [c[0][0] for c in monitor.gcode.respond_info.call_args_list]
+        assert not any("SILENCE_START" in m for m in respond_calls), respond_calls
+
+    def test_silence_start_emitted_after_threshold(self, tmp_path):
+        monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
+        self._setup_printing_state(monitor, manager)
+        manager.get_rdm_encoder_pulse.return_value = 100
+
+        # Three ticks covering > SILENCE_THRESHOLD_S (3s).
+        monitor._log_tangle_telemetry(0.05, current_tool=0)
+        monitor._log_tangle_telemetry(2.0, current_tool=0)
+        monitor._log_tangle_telemetry(3.5, current_tool=0)
+
+        respond_calls = [c[0][0] for c in monitor.gcode.respond_info.call_args_list]
+        assert any("SILENCE_START" in m for m in respond_calls), respond_calls
+
+    def test_silence_start_emitted_only_once(self, tmp_path):
+        monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
+        self._setup_printing_state(monitor, manager)
+        manager.get_rdm_encoder_pulse.return_value = 100
+
+        for t in (0.05, 1.0, 2.0, 3.5, 4.0, 5.0):
+            monitor._log_tangle_telemetry(t, current_tool=0)
+
+        respond_calls = [c[0][0] for c in monitor.gcode.respond_info.call_args_list]
+        starts = [m for m in respond_calls if "SILENCE_START" in m]
+        assert len(starts) == 1, f"expected 1 SILENCE_START, got {len(starts)}: {starts}"
+
+    def test_silence_end_emitted_on_pulse_with_duration(self, tmp_path):
+        monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
+        self._setup_printing_state(monitor, manager)
+        manager.get_rdm_encoder_pulse.return_value = 100
+
+        monitor._log_tangle_telemetry(0.05, current_tool=0)
+        monitor._log_tangle_telemetry(2.0, current_tool=0)
+        monitor._log_tangle_telemetry(4.0, current_tool=0)  # SILENCE_START
+        # Encoder ticks
+        manager.get_rdm_encoder_pulse.return_value = 101
+        monitor._log_tangle_telemetry(5.0, current_tool=0)
+
+        respond_calls = [c[0][0] for c in monitor.gcode.respond_info.call_args_list]
+        ends = [m for m in respond_calls if "SILENCE_END" in m]
+        assert len(ends) == 1, f"expected 1 SILENCE_END, got {ends}"
+        assert "dur=" in ends[0]
+
+    def test_no_marker_when_not_printing(self, tmp_path):
+        monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
+        self._setup_printing_state(monitor, manager)
+        monitor.last_print_state = "paused"  # not actively printing
+        manager.get_rdm_encoder_pulse.return_value = 100
+
+        for t in (0.05, 2.0, 4.0, 6.0):
+            monitor._log_tangle_telemetry(t, current_tool=0)
+
+        respond_calls = [c[0][0] for c in monitor.gcode.respond_info.call_args_list]
+        assert not any("SILENCE_" in m for m in respond_calls), respond_calls
+
+    def test_no_marker_when_feed_assist_off(self, tmp_path):
+        monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
+        self._setup_printing_state(monitor, manager)
+        manager.is_feed_assist_active.return_value = False
+        manager.get_rdm_encoder_pulse.return_value = 100
+
+        for t in (0.05, 2.0, 4.0, 6.0):
+            monitor._log_tangle_telemetry(t, current_tool=0)
+
+        respond_calls = [c[0][0] for c in monitor.gcode.respond_info.call_args_list]
+        assert not any("SILENCE_" in m for m in respond_calls), respond_calls
+
+    def test_end_without_start_emits_nothing(self, tmp_path):
+        """Encoder pulse before threshold should reset state without emitting END."""
+        monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
+        self._setup_printing_state(monitor, manager)
+        manager.get_rdm_encoder_pulse.return_value = 100
+
+        monitor._log_tangle_telemetry(0.05, current_tool=0)
+        monitor._log_tangle_telemetry(1.0, current_tool=0)
+        manager.get_rdm_encoder_pulse.return_value = 101
+        monitor._log_tangle_telemetry(2.0, current_tool=0)
+
+        respond_calls = [c[0][0] for c in monitor.gcode.respond_info.call_args_list]
+        assert not any("SILENCE_" in m for m in respond_calls), respond_calls
+
+
+# ─────────────────────────────────────────────────────────────────────────
 # TANGLE_TELEMETRY_MARK — model-start anchor
 # ─────────────────────────────────────────────────────────────────────────
 

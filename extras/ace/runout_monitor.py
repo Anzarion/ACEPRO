@@ -67,6 +67,11 @@ class RunoutMonitor:
     # at the smallest reasonable window (10 mm) and typical print
     # speeds this gives ≥10 evaluations per window — plenty.
     TANGLE_DW_EVAL_EVERY_N_TICKS = 4
+    # Diagnostic-only: minimum continuous encoder-silence (in seconds)
+    # before we emit a klippy.log marker. Chosen so brief slow patches
+    # don't spam, but the multi-second silences that surprised us in
+    # baseline runs do.
+    SILENCE_THRESHOLD_S = 3.0
 
     # Theoretical encoder length-per-pulse from the RDM hardware geometry
     # (Kobra-S1/K3M reference).  Used as a comparison anchor in the
@@ -231,6 +236,18 @@ class RunoutMonitor:
         # skip idle ticks (pre-print, between prints) while still capturing
         # the on/off transition itself.  None on the very first tick.
         self._tlm_prev_feed_assist = None
+
+        # --- Silence-phase tracking for diagnostic correlation ---
+        # When the encoder stays at d_encoder=0 for >SILENCE_THRESHOLD_S
+        # while feed_assist is on and we are actively printing, emit a
+        # one-time klippy.log marker so an analyst can correlate the
+        # silence with concurrent Klipper activity (macros, stalls, TMC
+        # events).  Reset when encoder ticks again or any pre-condition
+        # drops.  See PLAN-tangle-detection.md for the diagnostic intent.
+        self._tlm_silence_start_t = None
+        self._tlm_silence_start_ext = None
+        self._tlm_silence_start_enc = None
+        self._tlm_silence_logged = False
 
         # --- Model-start anchor (TANGLE_TELEMETRY_MARK) ---
         # Snapshot taken when the user-issued mark fires from PRINT_START,
@@ -1089,6 +1106,66 @@ class RunoutMonitor:
     # once a second).  It does NOT touch tangle detection state and never
     # raises out of the monitor.
 
+    def _get_ace_action(self):
+        """Return the ACE-reported `action` field for the active instance.
+
+        Reads `serial_mgr.last_action` (set by `_status_update_callback`)
+        from the first instance whose feed_assist is active.  Returns the
+        literal device value ("none"/"feeding"/"busy"/...) or "-" if no
+        instance is currently feeding / no value cached yet.
+
+        Diagnostic-only; never raises.
+        """
+        try:
+            instances = getattr(self.manager, "instances", None) or []
+            for inst in instances:
+                if getattr(inst, "_feed_assist_index", -1) < 0:
+                    continue
+                serial_mgr = getattr(inst, "serial_mgr", None)
+                if serial_mgr is None:
+                    continue
+                action = getattr(serial_mgr, "last_action", None)
+                if action:
+                    return str(action)
+            # Fallback: first instance with a cached action
+            for inst in instances:
+                serial_mgr = getattr(inst, "serial_mgr", None)
+                action = getattr(serial_mgr, "last_action", None) if serial_mgr else None
+                if action:
+                    return str(action)
+        except Exception:
+            pass
+        return "-"
+
+    def _get_mcu_count_raw(self):
+        """Return the MCU_counter's last raw count from the RDM tracker.
+
+        Compares against the tracker_status.encoder_pulse value already
+        logged in the TSV: a divergence means we have a software-side
+        accounting bug (e.g. MCU callback dropped a delta).
+        """
+        try:
+            sensor = self.manager.sensors.get(SENSOR_RDM)
+            if sensor is None:
+                return -1
+            tracker = getattr(sensor, "_tracker", None)
+            if tracker is None:
+                return -1
+            return int(getattr(tracker, "_mcu_counter_last_count", -1))
+        except Exception:
+            return -1
+
+    def _get_extruder_pwm(self, eventtime):
+        """Return the extruder heater PWM duty (0.0 - 1.0), or 0.0."""
+        try:
+            extruder = self.printer.lookup_object("extruder", None)
+            if extruder is None:
+                return 0.0
+            status = extruder.get_status(eventtime)
+            return float(status.get("power", 0.0))
+        except Exception:
+            return 0.0
+
     def _get_length_per_pulse(self):
         """Return the RDM tracker's configured length_per_pulse, or None.
 
@@ -1137,7 +1214,8 @@ class RunoutMonitor:
                 "no detection logic\n"
                 "# Columns: eventtime tool encoder_pulse extruder_pos "
                 "d_encoder d_extruder print_state feed_assist rdm "
-                "toolhead simple_event layer toolchange filament_pos\n"
+                "toolhead simple_event layer toolchange filament_pos "
+                "ace_action mcu_count_raw ext_pwm\n"
             )
             self._tlm_resolved_log_path = path
             return True
@@ -1297,6 +1375,66 @@ class RunoutMonitor:
         simple_event = self._tlm_pending_simple_event
         self._tlm_pending_simple_event = ""
 
+        # ---- Diagnostic-only parallel signals (added 2026-05-31) ----
+        # Three extra columns we read each tick to help root-cause encoder
+        # silence phases.  All read defensively (best-effort) and never
+        # raise out of the telemetry path.
+        ace_action = self._get_ace_action()
+        mcu_count_raw = self._get_mcu_count_raw()
+        ext_pwm = self._get_extruder_pwm(eventtime)
+
+        # ---- Silence-marker emission ----
+        # Track continuous d_encoder==0 stretches while actively printing.
+        # When the stretch exceeds SILENCE_THRESHOLD_S, emit a one-time
+        # respond_info line to klippy.log so an analyst can correlate the
+        # silence with concurrent Klipper activity (macros, TMC events,
+        # stalls).  Emits SILENCE_END with duration when the encoder ticks
+        # again so windowed klippy.log extraction is straightforward.
+        is_actively_printing = (
+            print_state == "printing" and feed_assist == 1
+        )
+        if is_actively_printing and d_encoder == 0:
+            if self._tlm_silence_start_t is None:
+                self._tlm_silence_start_t = eventtime
+                self._tlm_silence_start_ext = extruder_pos
+                self._tlm_silence_start_enc = encoder_value
+                self._tlm_silence_logged = False
+            elif (not self._tlm_silence_logged
+                  and (eventtime - self._tlm_silence_start_t)
+                       >= self.SILENCE_THRESHOLD_S):
+                self._tlm_silence_logged = True
+                try:
+                    self.gcode.respond_info(
+                        "ACE: tangle-tlm SILENCE_START "
+                        "t=%.2f ext=%.1f enc=%d ace_action=%s "
+                        "ext_pwm=%.2f layer=%s"
+                        % (self._tlm_silence_start_t,
+                           self._tlm_silence_start_ext,
+                           self._tlm_silence_start_enc,
+                           ace_action, ext_pwm, current_layer)
+                    )
+                except Exception:
+                    pass
+        else:
+            # End-of-silence: only emit if we had logged a START.
+            if self._tlm_silence_logged and self._tlm_silence_start_t is not None:
+                dur = eventtime - self._tlm_silence_start_t
+                ext_delta = extruder_pos - (self._tlm_silence_start_ext or 0.0)
+                try:
+                    self.gcode.respond_info(
+                        "ACE: tangle-tlm SILENCE_END "
+                        "t=%.2f ext=%.1f enc=%d dur=%.1fs ext_delta=%.1fmm "
+                        "ace_action=%s layer=%s"
+                        % (eventtime, extruder_pos, encoder_value,
+                           dur, ext_delta, ace_action, current_layer)
+                    )
+                except Exception:
+                    pass
+            self._tlm_silence_start_t = None
+            self._tlm_silence_start_ext = None
+            self._tlm_silence_start_enc = None
+            self._tlm_silence_logged = False
+
         # ---- TSV row ----
         if self._tlm_file_handle is not None:
             try:
@@ -1305,7 +1443,8 @@ class RunoutMonitor:
                     f"{extruder_pos:.3f}\t{d_encoder}\t{d_extruder:.3f}\t"
                     f"{print_state}\t{feed_assist}\t{rdm}\t{toolhead}\t"
                     f"{simple_event}\t{current_layer}\t"
-                    f"{toolchange}\t{filament_pos}\n"
+                    f"{toolchange}\t{filament_pos}\t"
+                    f"{ace_action}\t{mcu_count_raw}\t{ext_pwm:.2f}\n"
                 )
             except Exception as e:
                 logging.warning(
