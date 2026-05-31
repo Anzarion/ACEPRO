@@ -26,24 +26,54 @@
 .PARAMETER MinDurationS
     Skip silences shorter than this (default 0 = show all).
 
+.PARAMETER OutputFile
+    Where to mirror all console output. Default: silence-report.txt next
+    to the input KlippyLog. Pass "" or "-" to disable file output.
+
 .EXAMPLE
     .\silence-correlate.ps1 -KlippyLog .\klippy.log
 
 .EXAMPLE
     .\silence-correlate.ps1 -KlippyLog .\klippy.log -ContextSeconds 20 -MinDurationS 5
+
+.EXAMPLE
+    .\silence-correlate.ps1 -KlippyLog .\klippy.log -OutputFile C:\tmp\report.txt
 #>
 
 [CmdletBinding()]
 param(
     [Parameter(Mandatory, Position = 0)] [string] $KlippyLog,
     [double] $ContextSeconds = 10.0,
-    [double] $MinDurationS = 0.0
+    [double] $MinDurationS = 0.0,
+    [string] $OutputFile = $null
 )
 
 if (-not (Test-Path $KlippyLog)) {
     Write-Error "KlippyLog not found: $KlippyLog"
     exit 1
 }
+
+# Default output file: silence-report.txt alongside the input klippy.log.
+if ($null -eq $OutputFile) {
+    $OutputFile = Join-Path -Path (Split-Path -Parent (Resolve-Path $KlippyLog).Path) `
+                            -ChildPath 'silence-report.txt'
+}
+
+# Start-Transcript captures EVERYTHING (Write-Host, formatted strings,
+# everything visible on the console) without rewriting any output call.
+# Use $script:TranscriptStarted to know whether to stop it cleanly at exit.
+$script:TranscriptStarted = $false
+if ($OutputFile -and $OutputFile -ne '-' -and $OutputFile.Length -gt 0) {
+    try {
+        Start-Transcript -Path $OutputFile -Force | Out-Null
+        $script:TranscriptStarted = $true
+        Write-Host "(transcript: $OutputFile)" -ForegroundColor DarkGray
+    } catch {
+        Write-Warning "Could not open transcript file '$OutputFile': $($_.Exception.Message)"
+    }
+}
+
+try {
 
 Write-Host "=== Scanning klippy.log for SILENCE markers ===" -ForegroundColor Cyan
 $silences = @()
@@ -185,3 +215,9 @@ $totalMissing = [int][math]::Round($totalExt / 1.09)
 Write-Host "========================================" -ForegroundColor Magenta
 Write-Host "Summary: $($silences.Count) silences, total $([math]::Round($totalDur, 1))s, total $([math]::Round($totalExt, 1))mm ext_delta, ~$totalMissing missing pulses"
 Write-Host "========================================" -ForegroundColor Magenta
+
+} finally {
+    if ($script:TranscriptStarted) {
+        try { Stop-Transcript | Out-Null } catch { }
+    }
+}
