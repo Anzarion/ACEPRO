@@ -169,41 +169,65 @@ foreach ($s in ($silences | Sort-Object t_start)) {
     Write-Host "  klippy.log lines $($s.line_nr_start) to $($s.line_nr_end), context window $wStart to $wEnd s" -ForegroundColor Yellow
     Write-Host ""
 
-    # Stats summary
+    # Stats summary — extract each field individually because the Stats
+    # line layout varies (mcu_awake/srtt appear in the per-MCU block at
+    # the start, print_time/buffer_time/print_stall at the end).
     $statsInWindow = $klogIdx | Where-Object {
         $null -ne $_.StatsT -and $_.StatsT -ge $wStart -and $_.StatsT -le $wEnd
     }
-    Write-Host "  Stats lines in window:"
-    foreach ($st in $statsInWindow) {
-        if ($st.Line -match 'Stats (\d+\.\d+):.*print_time=(\S+) buffer_time=(\S+) print_stall=(\d+).*mcu_awake=(\S+) mcu_task_avg=(\S+).*srtt=(\S+).*bytes_retransmit=(\d+)') {
-            $fmt = "    t={0,-9} print_time={1,-9} buffer={2,-6} stall={3} mcu_awake={4} srtt={5} retrans={6}"
-            $fmt -f $Matches[1], $Matches[2], $Matches[3], $Matches[4], $Matches[5], $Matches[7], $Matches[8]
-        }
+    Write-Host "  Stats lines in window ($($statsInWindow.Count)):"
+    # Show first/middle/last + anything with non-zero stall (anomalies)
+    $statsArr = @($statsInWindow)
+    $statsAnomalies = $statsArr | Where-Object {
+        $_.Line -match 'print_stall=(\d+)' -and [int]$Matches[1] -gt 0
+    }
+    $statsToShow = @()
+    if ($statsArr.Count -gt 0) { $statsToShow += $statsArr[0] }
+    if ($statsArr.Count -gt 2) { $statsToShow += $statsArr[[int]($statsArr.Count / 2)] }
+    if ($statsArr.Count -gt 1) { $statsToShow += $statsArr[-1] }
+    $statsToShow += $statsAnomalies
+    foreach ($st in ($statsToShow | Sort-Object StatsT -Unique)) {
+        $line = $st.Line
+        $pt    = if ($line -match 'print_time=(\S+)')    { $Matches[1] } else { '?' }
+        $buf   = if ($line -match 'buffer_time=(\S+)')   { $Matches[1] } else { '?' }
+        $stall = if ($line -match 'print_stall=(\d+)')   { $Matches[1] } else { '?' }
+        $awk   = if ($line -match 'mcu: mcu_awake=(\S+)'){ $Matches[1] } else { '?' }
+        $srtt  = if ($line -match 'mcu:[^|]*?srtt=(\S+)'){ $Matches[1] } else { '?' }
+        $rtx   = if ($line -match 'mcu:[^|]*?bytes_retransmit=(\d+)') { $Matches[1] } else { '?' }
+        $sl    = if ($line -match 'sysload=(\S+)')       { $Matches[1] } else { '?' }
+        Write-Host ("    t={0,-9} pt={1,-9} buf={2,-6} stall={3} mcu_aw={4} srtt={5} retx={6} sysload={7}" -f `
+                    $st.StatsT, $pt, $buf, $stall, $awk, $srtt, $rtx, $sl)
+    }
+    if ($statsAnomalies.Count -gt 0) {
+        Write-Host ("    -> $($statsAnomalies.Count) Stats line(s) had print_stall > 0") -ForegroundColor Red
     }
 
     # Non-Stats lines in window
     Write-Host ""
     Write-Host "  Non-Stats klippy.log activity in window:"
-    $nonStats = $klogIdx | Where-Object {
-        $null -ne $_.LogicalT `
-        -and $_.LogicalT -ge $wStart -and $_.LogicalT -le $wEnd `
-        -and $null -eq $_.StatsT `
-        -and $_.Line.Trim().Length -gt 0 `
-        -and $_.Line -notmatch '^Receive:' `
-        -and $_.Line -notmatch '^Send:' `
-        -and $_.Line -notmatch '^Dump ' `
-        -and $_.Line -notmatch '^TMC '
-    }
-    if (-not $nonStats) {
+    $nonStats = @($klogIdx | Where-Object {
+        ($null -ne $_.LogicalT) `
+        -and ($_.LogicalT -ge $wStart) `
+        -and ($_.LogicalT -le $wEnd) `
+        -and ($null -eq $_.StatsT) `
+        -and ($_.Line.Trim().Length -gt 0) `
+        -and ($_.Line -notmatch '^Receive:') `
+        -and ($_.Line -notmatch '^Send:') `
+        -and ($_.Line -notmatch '^Dump ') `
+        -and ($_.Line -notmatch '^TMC ') `
+        -and ($_.Line -notmatch '^>>>') `
+        -and ($_.Line -notmatch '^---')
+    })
+    if ($nonStats.Count -eq 0) {
         Write-Host "    (no non-Stats activity in window)" -ForegroundColor DarkGray
     } else {
+        Write-Host "    ($($nonStats.Count) lines):"
         foreach ($n in $nonStats) {
             $preview = $n.Line
             if ($preview.Length -gt 180) {
                 $preview = $preview.Substring(0, 180) + " [...]"
             }
-            $fmt = "    L{0,-6} t~{1,-9} {2}"
-            $fmt -f $n.LineNumber, $n.LogicalT, $preview
+            Write-Host ("    L{0,-6} t~{1,-9} {2}" -f $n.LineNumber, $n.LogicalT, $preview)
         }
     }
     Write-Host ""
