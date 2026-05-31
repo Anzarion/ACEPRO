@@ -72,6 +72,11 @@ class RunoutMonitor:
     # don't spam, but the multi-second silences that surprised us in
     # baseline runs do.
     SILENCE_THRESHOLD_S = 3.0
+    # Minimum forward extrusion (mm) during the silence before we
+    # consider it interesting.  Pre-print phases (tool load, bed mesh,
+    # heat-up) keep print_state="printing" and feed_assist=1 but the
+    # extruder doesn't move — we don't want to flag those.
+    SILENCE_MIN_EXT_MM = 2.0
 
     # Theoretical encoder length-per-pulse from the RDM hardware geometry
     # (Kobra-S1/K3M reference).  Used as a comparison anchor in the
@@ -1385,11 +1390,16 @@ class RunoutMonitor:
 
         # ---- Silence-marker emission ----
         # Track continuous d_encoder==0 stretches while actively printing.
-        # When the stretch exceeds SILENCE_THRESHOLD_S, emit a one-time
-        # respond_info line to klippy.log so an analyst can correlate the
-        # silence with concurrent Klipper activity (macros, TMC events,
-        # stalls).  Emits SILENCE_END with duration when the encoder ticks
-        # again so windowed klippy.log extraction is straightforward.
+        # When the stretch exceeds SILENCE_THRESHOLD_S AND the extruder
+        # has actually moved forward SILENCE_MIN_EXT_MM during it, emit a
+        # one-time respond_info line to klippy.log so an analyst can
+        # correlate the silence with concurrent Klipper activity (macros,
+        # TMC events, stalls).  The ext-movement gate filters out
+        # pre-print / mid-print idle phases (tool load, bed mesh, heat-up)
+        # where print_state stays "printing" and feed_assist=1 but the
+        # extruder doesn't move — those silences are not interesting.
+        # Emits SILENCE_END with duration when the encoder ticks again so
+        # windowed klippy.log extraction is straightforward.
         is_actively_printing = (
             print_state == "printing" and feed_assist == 1
         )
@@ -1399,22 +1409,24 @@ class RunoutMonitor:
                 self._tlm_silence_start_ext = extruder_pos
                 self._tlm_silence_start_enc = encoder_value
                 self._tlm_silence_logged = False
-            elif (not self._tlm_silence_logged
-                  and (eventtime - self._tlm_silence_start_t)
-                       >= self.SILENCE_THRESHOLD_S):
-                self._tlm_silence_logged = True
-                try:
-                    self.gcode.respond_info(
-                        "ACE: tangle-tlm SILENCE_START "
-                        "t=%.2f ext=%.1f enc=%d ace_action=%s "
-                        "ext_pwm=%.2f layer=%s"
-                        % (self._tlm_silence_start_t,
-                           self._tlm_silence_start_ext,
-                           self._tlm_silence_start_enc,
-                           ace_action, ext_pwm, current_layer)
-                    )
-                except Exception:
-                    pass
+            elif not self._tlm_silence_logged:
+                elapsed = eventtime - self._tlm_silence_start_t
+                ext_moved = extruder_pos - (self._tlm_silence_start_ext or 0.0)
+                if (elapsed >= self.SILENCE_THRESHOLD_S
+                        and ext_moved >= self.SILENCE_MIN_EXT_MM):
+                    self._tlm_silence_logged = True
+                    try:
+                        self.gcode.respond_info(
+                            "ACE: tangle-tlm SILENCE_START "
+                            "t=%.2f ext=%.1f enc=%d ace_action=%s "
+                            "ext_pwm=%.2f layer=%s"
+                            % (self._tlm_silence_start_t,
+                               self._tlm_silence_start_ext,
+                               self._tlm_silence_start_enc,
+                               ace_action, ext_pwm, current_layer)
+                        )
+                    except Exception:
+                        pass
         else:
             # End-of-silence: only emit if we had logged a START.
             if self._tlm_silence_logged and self._tlm_silence_start_t is not None:

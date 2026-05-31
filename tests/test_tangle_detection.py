@@ -1090,29 +1090,52 @@ class TestSilenceMarkers:
     for offline post-print correlation analysis."""
 
     def _setup_printing_state(self, monitor, manager):
-        monitor._get_extruder_pos = Mock(return_value=10.0)
         manager.is_feed_assist_active.return_value = True
         manager.get_switch_state.return_value = True
         monitor.last_print_state = "printing"
 
-    def test_no_marker_below_threshold(self, tmp_path):
+    def _set_ext_pos_over_time(self, monitor, points):
+        """Make _get_extruder_pos return values based on call order so
+        tests can simulate forward extrusion (or its absence) across ticks."""
+        iter_points = iter(points)
+        monitor._get_extruder_pos = Mock(side_effect=lambda *_args, **_kw: next(iter_points))
+
+    def test_no_marker_below_time_threshold(self, tmp_path):
         monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
         self._setup_printing_state(monitor, manager)
-        # Encoder static; consecutive ticks under threshold.
         manager.get_rdm_encoder_pulse.return_value = 100
+        # Extruder moves >2mm but elapsed time < 3s — not yet a silence.
+        self._set_ext_pos_over_time(monitor, [10.0, 12.5, 15.0])
 
-        for t in (0.05, 1.0, 2.0):  # 1.95s total — under 3s threshold
+        for t in (0.05, 1.0, 2.0):
             monitor._log_tangle_telemetry(t, current_tool=0)
 
         respond_calls = [c[0][0] for c in monitor.gcode.respond_info.call_args_list]
         assert not any("SILENCE_START" in m for m in respond_calls), respond_calls
 
-    def test_silence_start_emitted_after_threshold(self, tmp_path):
+    def test_no_marker_when_extruder_idle(self, tmp_path):
+        """Bug repro: SILENCE_START fired during tool load / bed mesh
+        because print_state=printing+fa=1 but the extruder wasn't moving.
+        Fix: also require >= SILENCE_MIN_EXT_MM forward movement."""
         monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
         self._setup_printing_state(monitor, manager)
         manager.get_rdm_encoder_pulse.return_value = 100
+        # Extruder static — over enough time to exceed time threshold.
+        self._set_ext_pos_over_time(monitor, [10.0, 10.0, 10.0, 10.0])
 
-        # Three ticks covering > SILENCE_THRESHOLD_S (3s).
+        for t in (0.05, 1.0, 2.0, 4.0):
+            monitor._log_tangle_telemetry(t, current_tool=0)
+
+        respond_calls = [c[0][0] for c in monitor.gcode.respond_info.call_args_list]
+        assert not any("SILENCE_START" in m for m in respond_calls), respond_calls
+
+    def test_silence_start_emitted_when_time_AND_ext_thresholds_met(self, tmp_path):
+        monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
+        self._setup_printing_state(monitor, manager)
+        manager.get_rdm_encoder_pulse.return_value = 100
+        # 3.5s elapsed AND 4mm extruder moved — both thresholds tripped.
+        self._set_ext_pos_over_time(monitor, [10.0, 12.0, 14.0])
+
         monitor._log_tangle_telemetry(0.05, current_tool=0)
         monitor._log_tangle_telemetry(2.0, current_tool=0)
         monitor._log_tangle_telemetry(3.5, current_tool=0)
@@ -1124,6 +1147,7 @@ class TestSilenceMarkers:
         monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
         self._setup_printing_state(monitor, manager)
         manager.get_rdm_encoder_pulse.return_value = 100
+        self._set_ext_pos_over_time(monitor, [10.0, 11.0, 12.0, 14.0, 16.0, 18.0])
 
         for t in (0.05, 1.0, 2.0, 3.5, 4.0, 5.0):
             monitor._log_tangle_telemetry(t, current_tool=0)
@@ -1136,11 +1160,11 @@ class TestSilenceMarkers:
         monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
         self._setup_printing_state(monitor, manager)
         manager.get_rdm_encoder_pulse.return_value = 100
+        self._set_ext_pos_over_time(monitor, [10.0, 12.0, 14.0, 16.0])
 
         monitor._log_tangle_telemetry(0.05, current_tool=0)
         monitor._log_tangle_telemetry(2.0, current_tool=0)
         monitor._log_tangle_telemetry(4.0, current_tool=0)  # SILENCE_START
-        # Encoder ticks
         manager.get_rdm_encoder_pulse.return_value = 101
         monitor._log_tangle_telemetry(5.0, current_tool=0)
 
@@ -1152,8 +1176,9 @@ class TestSilenceMarkers:
     def test_no_marker_when_not_printing(self, tmp_path):
         monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
         self._setup_printing_state(monitor, manager)
-        monitor.last_print_state = "paused"  # not actively printing
+        monitor.last_print_state = "paused"
         manager.get_rdm_encoder_pulse.return_value = 100
+        self._set_ext_pos_over_time(monitor, [10.0, 12.0, 14.0, 16.0])
 
         for t in (0.05, 2.0, 4.0, 6.0):
             monitor._log_tangle_telemetry(t, current_tool=0)
@@ -1166,6 +1191,7 @@ class TestSilenceMarkers:
         self._setup_printing_state(monitor, manager)
         manager.is_feed_assist_active.return_value = False
         manager.get_rdm_encoder_pulse.return_value = 100
+        self._set_ext_pos_over_time(monitor, [10.0, 12.0, 14.0, 16.0])
 
         for t in (0.05, 2.0, 4.0, 6.0):
             monitor._log_tangle_telemetry(t, current_tool=0)
@@ -1178,6 +1204,7 @@ class TestSilenceMarkers:
         monitor, manager, log_path = _make_telemetry_monitor(tmp_path)
         self._setup_printing_state(monitor, manager)
         manager.get_rdm_encoder_pulse.return_value = 100
+        self._set_ext_pos_over_time(monitor, [10.0, 12.0, 14.0])
 
         monitor._log_tangle_telemetry(0.05, current_tool=0)
         monitor._log_tangle_telemetry(1.0, current_tool=0)
