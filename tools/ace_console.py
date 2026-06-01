@@ -107,6 +107,8 @@ def main():
     parser.add_argument("--baud", type=int, default=115200, help="Baud rate (default: 115200)")
     parser.add_argument("--interval", type=float, default=1.0, help="get_status poll interval in seconds (default: 1.0)")
     parser.add_argument("--count", type=int, default=0, help="Number of status polls before exit (0 = infinite)")
+    parser.add_argument("--full", action="store_true", help="Dump full JSON on EVERY poll (default: only on first poll + on field-set changes)")
+    parser.add_argument("--feed-test", type=int, default=-1, help="Run feed_assist on this slot index in parallel (provokes tangle response when filament blocked)")
     args = parser.parse_args()
 
     print(f"Connecting to {args.port} @ {args.baud} baud...")
@@ -137,9 +139,21 @@ def main():
     else:
         print("[get_info] No response (timeout)\n", file=sys.stderr)
 
+    # --- optionally start feed_assist on a slot ---
+    if args.feed_test >= 0:
+        print(f"\n*** Enabling feed_assist on slot {args.feed_test} ***")
+        feed_req = {"method": "start_feed_assist", "params": {"index": args.feed_test}}
+        response, buf = send_and_receive(ser, buf, feed_req, req_id, timeout=5.0)
+        req_id += 1
+        print(f"[start_feed_assist] {json.dumps(response, indent=2) if response else 'TIMEOUT'}\n")
+        print("Provoke the tangle now (block the spool / clamp the bowden).")
+        print("Watch for slot.status changes or new fields below.\n")
+
     # --- cyclic get_status ---
     print(f"Polling get_status every {args.interval}s  (Ctrl+C to stop)\n")
     poll = 0
+    last_keys_signature = None  # tracks what fields are present
+    last_values = {}  # for change detection per field
     try:
         while args.count == 0 or poll < args.count:
             t0 = time.time()
@@ -154,17 +168,56 @@ def main():
                 status = result.get("status", "?")
                 action = result.get("action", "?")
                 temp = result.get("temp", "?")
+                code = response.get("code", "?")
+                msg = response.get("msg", "?")
                 slots = result.get("slots", [])
 
                 slot_summary = "  ".join(
                     f"S{s.get('index','?')}:{s.get('status','?')}"
                     for s in slots
                 )
-                print(f"[{ts}] #{poll:4d}  status={status}  action={action}  temp={temp}°C  |  {slot_summary}  ({elapsed*1000:.0f}ms)")
+                print(f"[{ts}] #{poll:4d}  code={code} msg={msg} status={status}  action={action}  temp={temp}  |  {slot_summary}  ({elapsed*1000:.0f}ms)")
 
-                # Print full JSON on first poll so user can see all fields
-                if poll == 1:
+                # Compute a key-set signature so we detect NEW or REMOVED fields anywhere in result
+                def collect_keys(obj, prefix=""):
+                    keys = set()
+                    if isinstance(obj, dict):
+                        for k, v in obj.items():
+                            full_key = f"{prefix}.{k}" if prefix else k
+                            keys.add(full_key)
+                            keys.update(collect_keys(v, full_key))
+                    elif isinstance(obj, list):
+                        for i, item in enumerate(obj):
+                            keys.update(collect_keys(item, f"{prefix}[{i}]"))
+                    return keys
+
+                key_signature = frozenset(collect_keys(response))
+
+                # First poll OR keys changed OR --full → dump everything
+                if args.full or poll == 1 or key_signature != last_keys_signature:
+                    if poll != 1 and last_keys_signature is not None:
+                        added = key_signature - last_keys_signature
+                        removed = last_keys_signature - key_signature
+                        if added:
+                            print(f"  *** NEW FIELDS: {sorted(added)} ***")
+                        if removed:
+                            print(f"  *** REMOVED FIELDS: {sorted(removed)} ***")
                     print(f"\n  Full response:\n{json.dumps(response, indent=4)}\n")
+                    last_keys_signature = key_signature
+                else:
+                    # Still flag value changes on known interesting fields
+                    interesting = {"code": code, "msg": msg, "result.status": status, "result.action": action}
+                    for slot in slots:
+                        idx = slot.get("index", "?")
+                        interesting[f"slot[{idx}].status"] = slot.get("status")
+                        interesting[f"slot[{idx}].rfid"] = slot.get("rfid")
+                    changes = []
+                    for k, v in interesting.items():
+                        if k in last_values and last_values[k] != v:
+                            changes.append(f"{k}: {last_values[k]!r} → {v!r}")
+                        last_values[k] = v
+                    if changes:
+                        print(f"  *** VALUE CHANGES: {changes} ***")
             else:
                 print(f"[{ts}] #{poll:4d}  TIMEOUT ({elapsed*1000:.0f}ms)", file=sys.stderr)
 
@@ -177,6 +230,15 @@ def main():
     except KeyboardInterrupt:
         print(f"\nStopped after {poll} polls.")
     finally:
+        # Best-effort: stop feed_assist if we started one
+        if args.feed_test >= 0:
+            try:
+                print(f"\nStopping feed_assist on slot {args.feed_test}...")
+                stop_req = {"method": "stop_feed_assist", "params": {"index": args.feed_test}}
+                response, buf = send_and_receive(ser, buf, stop_req, req_id, timeout=2.0)
+                print(f"[stop_feed_assist] {json.dumps(response, indent=2) if response else 'TIMEOUT'}")
+            except Exception:
+                pass
         ser.close()
 
 
