@@ -232,7 +232,10 @@ class AceManager:
             tangle_detection=self.ace_config.get("tangle_detection", False),
             tangle_detection_length=self.ace_config.get("tangle_detection_length", 15.0),
             tangle_detection_mode=self.ace_config.get(
-                "tangle_detection_mode", "distance_window"
+                "tangle_detection_mode", "pump_time"
+            ),
+            tangle_pump_threshold_s=self.ace_config.get(
+                "tangle_pump_threshold_s", 4.0
             ),
             tangle_window_extrude_mm=self.ace_config.get(
                 "tangle_window_extrude_mm", 30.0

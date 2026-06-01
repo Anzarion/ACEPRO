@@ -20,15 +20,13 @@ from ace.config import SENSOR_TOOLHEAD, SENSOR_RDM
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
-def _make_monitor(tangle_detection=True, tangle_detection_mode="simple"):
+def _make_monitor(tangle_detection=True, tangle_detection_mode="pump_time"):
     """Create a RunoutMonitor wired for tangle detection tests.
 
-    Default ``tangle_detection_mode`` is "simple" so the existing
-    TestTangleConditionGates / TestTanglePositiveDetection / TestTangleWindowManagement
-    suites — which assert against the legacy point-to-point checker —
-    keep exercising that code path.  The new distance-window tests
-    construct a monitor with ``tangle_detection_mode="distance_window"``
-    explicitly via TestDistanceWindowDetection's own helper.
+    Default ``tangle_detection_mode`` is "pump_time" — the new default
+    detector that reads the ACE-reported cont_assist_time.  Legacy
+    distance_window tests in ``TestDistanceWindowDetection`` construct
+    their own monitor with the explicit mode.
 
     Returns (monitor, printer, gcode, reactor, manager) so tests can
     configure behaviour on the mocks.
@@ -178,8 +176,118 @@ class TestTangleDetectionInit:
 
 # ── Condition gates (each disables one condition) ────────────────────────
 
-class TestTangleConditionGates:
-    """Each test ensures that removing one condition prevents detection."""
+class TestPumpTimeDetection:
+    """Tests for the pump_time tangle detector — reads cont_assist_time
+    from instance._info and triggers when it crosses the threshold.
+
+    The detector is encoder-independent; the encoder column in the
+    telemetry remains for diagnostics but never drives the trigger.
+    """
+
+    def _setup(self, threshold_s=4.0, cont_assist_time=None,
+               feed_assist_active=True, rdm_present=True,
+               toolhead_present=True):
+        printer = Mock(); gcode = Mock(); reactor = Mock()
+        reactor.NOW = 0.0; reactor.NEVER = float("inf")
+        manager = Mock()
+        manager.toolchange_in_progress = False
+        manager.state = Mock(); manager.state.get = Mock(return_value=-1)
+        manager.is_feed_assist_active.return_value = feed_assist_active
+
+        def switch_state(name):
+            if name == SENSOR_RDM:
+                return rdm_present
+            if name == SENSOR_TOOLHEAD:
+                return toolhead_present
+            return True
+        manager.get_switch_state.side_effect = switch_state
+
+        inst = Mock()
+        inst._feed_assist_index = 0
+        inst._info = {}
+        if cont_assist_time is not None:
+            inst._info["cont_assist_time"] = cont_assist_time
+        manager.instances = [inst]
+
+        monitor = RunoutMonitor(
+            printer, gcode, reactor, Mock(), manager,
+            runout_debounce_count=1,
+            tangle_detection=True,
+            tangle_detection_mode="pump_time",
+            tangle_pump_threshold_s=threshold_s,
+        )
+        return monitor, manager, gcode, inst
+
+    def test_no_trigger_below_threshold(self):
+        monitor, _m, gcode, inst = self._setup(threshold_s=4.0)
+        inst._info["cont_assist_time"] = 2.5
+        monitor._check_tangle_pump_time(100.0, current_tool=0)
+        # No PAUSE
+        pause_calls = [c for c in gcode.run_script_from_command.call_args_list
+                       if "PAUSE" in str(c)]
+        assert pause_calls == []
+
+    def test_trigger_at_threshold(self):
+        monitor, _m, gcode, inst = self._setup(threshold_s=4.0)
+        # First tick: phase starts
+        inst._info["cont_assist_time"] = 1.0
+        monitor._check_tangle_pump_time(100.0, current_tool=0)
+        # Second tick: crosses threshold
+        inst._info["cont_assist_time"] = 4.0
+        monitor._check_tangle_pump_time(101.0, current_tool=0)
+        pause_calls = [c for c in gcode.run_script_from_command.call_args_list
+                       if "PAUSE" in str(c)]
+        assert pause_calls, "expected PAUSE on threshold cross"
+
+    def test_no_trigger_when_feed_assist_off(self):
+        monitor, _m, gcode, inst = self._setup(
+            threshold_s=4.0, feed_assist_active=False)
+        inst._info["cont_assist_time"] = 10.0  # massive value
+        monitor._check_tangle_pump_time(100.0, current_tool=0)
+        pause_calls = [c for c in gcode.run_script_from_command.call_args_list
+                       if "PAUSE" in str(c)]
+        assert pause_calls == []
+
+    def test_no_trigger_when_rdm_clear(self):
+        monitor, _m, gcode, inst = self._setup(
+            threshold_s=4.0, rdm_present=False)
+        inst._info["cont_assist_time"] = 10.0
+        monitor._check_tangle_pump_time(100.0, current_tool=0)
+        pause_calls = [c for c in gcode.run_script_from_command.call_args_list
+                       if "PAUSE" in str(c)]
+        assert pause_calls == []
+
+    def test_no_trigger_when_field_missing(self):
+        """ACE didn't report cont_assist_time — silently noop."""
+        monitor, _m, gcode, inst = self._setup(threshold_s=4.0)
+        # cont_assist_time intentionally absent from inst._info
+        monitor._check_tangle_pump_time(100.0, current_tool=0)
+        # Doesn't raise, doesn't trigger
+        pause_calls = [c for c in gcode.run_script_from_command.call_args_list
+                       if "PAUSE" in str(c)]
+        assert pause_calls == []
+
+    def test_value_drop_resets_phase(self):
+        """ACE pump cycle ended (value dropped) → phase tracker resets."""
+        monitor, _m, gcode, inst = self._setup(threshold_s=4.0)
+        inst._info["cont_assist_time"] = 2.0
+        monitor._check_tangle_pump_time(100.0, current_tool=0)
+        assert monitor._pt_phase_start_eventtime is not None
+        # Value drops (ACE finished pump cycle)
+        inst._info["cont_assist_time"] = 0.0
+        monitor._check_tangle_pump_time(101.0, current_tool=0)
+        assert monitor._pt_phase_start_eventtime is None
+
+    def test_clamps_threshold_below_floor(self):
+        """Configured threshold below TANGLE_PUMP_THRESHOLD_FLOOR_S clamps."""
+        monitor, *_ = self._setup(threshold_s=0.5)
+        assert monitor.tangle_pump_threshold_s == (
+            RunoutMonitor.TANGLE_PUMP_THRESHOLD_FLOOR_S)
+
+
+class _LegacyConditionGates_DELETED:
+    """Replaced by TestPumpTimeDetection — these tested the removed
+    simple-mode detector and its window-management state."""
 
     def setup_method(self):
         """Create a tangle-enabled monitor."""
@@ -305,8 +413,9 @@ class TestTangleConditionGates:
 
 # ── Positive detection ──────────────────────────────────────────────────
 
-class TestTanglePositiveDetection:
-    """Verify tangle fires when all 6 conditions hold."""
+class _LegacyPositiveDetection_DELETED:
+    """Replaced by TestPumpTimeDetection.test_trigger_at_threshold —
+    these tested the removed simple-mode detector."""
 
     def setup_method(self):
         (self.monitor, self.printer, self.gcode,
@@ -379,8 +488,9 @@ class TestTanglePositiveDetection:
 
 # ── Window management ────────────────────────────────────────────────────
 
-class TestTangleWindowManagement:
-    """Verify the tangle detection window resets correctly."""
+class _LegacyWindowManagement_DELETED:
+    """Replaced by TestPumpTimeDetection.test_value_drop_resets_phase —
+    these tested the removed simple-mode detector's window state."""
 
     def setup_method(self):
         (self.monitor, self.printer, self.gcode,

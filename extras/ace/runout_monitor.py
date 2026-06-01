@@ -51,21 +51,40 @@ class RunoutMonitor:
     # Klipper filament_motion_sensor cadence.
     TANGLE_CHECK_INTERVAL = 0.250
 
-    # ── Distance-window detector defaults ─────────────────────────────
-    # See PLAN-tangle-detection.md for the full rationale.
-    VALID_TANGLE_MODES = ("distance_window", "simple", "off")
-    DEFAULT_TANGLE_MODE = "distance_window"
+    # ── Tangle detector modes ─────────────────────────────────────────
+    # pump_time (default): trigger on ACE-reported cont_assist_time growing
+    #   beyond a threshold.  ACE keeps pumping when filament can't be
+    #   pulled from the spool; that's a direct, encoder-independent
+    #   tangle signal.  See PLAN-tangle-detection.md for full rationale
+    #   and the discovery story.
+    # distance_window: legacy encoder-vs-extruder ratio detector.  Kept
+    #   for hardware setups where the ACE doesn't report cont_assist_time
+    #   (older firmware, ACE clones) and for diagnostic comparison runs.
+    # simple: legacy point-to-point check.  Removed — never reliable on
+    #   long Bowdens, retained only as a refused config value with a
+    #   pointed error message.
+    # off: no detection logic runs.
+    VALID_TANGLE_MODES = ("pump_time", "distance_window", "off")
+    DEFAULT_TANGLE_MODE = "pump_time"
+
+    # ── pump_time detector defaults ───────────────────────────────────
+    # Threshold for cont_assist_time before declaring a tangle.  Normal
+    # buffer-refill pump bursts last 0.1–0.3 s; an unblocked extruder
+    # never holds the pump open for multiple seconds at a time.  Empirical
+    # observation on V1.3.863 firmware: under active blockade cont_assist
+    # _time grew monotonically (1 s → 18 s) before the test ended.  4 s
+    # is well past any legitimate single pump burst.
+    DEFAULT_TANGLE_PUMP_THRESHOLD_S = 4.0
+    # Hard floor — below this we'd false-positive on a single slow buffer
+    # refill at very low print speeds.
+    TANGLE_PUMP_THRESHOLD_FLOOR_S = 2.0
+
+    # ── Distance-window detector defaults (legacy) ─────────────────────
     DEFAULT_TANGLE_WINDOW_EXTRUDE_MM = 30.0      # rolling window width
     DEFAULT_TANGLE_RATIO_THRESHOLD = 0.30        # ppm cutoff
     DEFAULT_TANGLE_CONFIRMATION_COUNT = 1        # consecutive bad evals
-    # Hard validation floors / ceilings.  Below these the detector
-    # becomes trivially sensitive and would false-positive in normal
-    # ACE-hysteresis stalls; above them it would be effectively off.
     TANGLE_WINDOW_EXTRUDE_FLOOR_MM = 10.0
     TANGLE_RATIO_THRESHOLD_MAX = 0.90
-    # Evaluate the window every Nth monitor tick.  4 × 50 ms = 200 ms;
-    # at the smallest reasonable window (10 mm) and typical print
-    # speeds this gives ≥10 evaluations per window — plenty.
     TANGLE_DW_EVAL_EVERY_N_TICKS = 4
     # Diagnostic-only: minimum continuous encoder-silence (in seconds)
     # before we emit a klippy.log marker. Chosen so brief slow patches
@@ -88,6 +107,7 @@ class RunoutMonitor:
                  runout_debounce_count=1, tangle_detection=False,
                  tangle_detection_length=None,
                  tangle_detection_mode=None,
+                 tangle_pump_threshold_s=None,
                  tangle_window_extrude_mm=None,
                  tangle_ratio_threshold=None,
                  tangle_confirmation_count=None,
@@ -156,6 +176,13 @@ class RunoutMonitor:
             tangle_detection_mode if tangle_detection_mode is not None
             else self.DEFAULT_TANGLE_MODE
         )
+        if requested_mode == "simple":
+            logging.warning(
+                "ACE: tangle_detection_mode=simple has been removed "
+                "(never reliable on long Bowdens); falling back to %r",
+                self.DEFAULT_TANGLE_MODE,
+            )
+            requested_mode = self.DEFAULT_TANGLE_MODE
         if requested_mode not in self.VALID_TANGLE_MODES:
             logging.warning(
                 "ACE: tangle_detection_mode=%r is not one of %s; "
@@ -165,6 +192,22 @@ class RunoutMonitor:
             )
             requested_mode = self.DEFAULT_TANGLE_MODE
         self.tangle_detection_mode = requested_mode
+
+        # pump_time detector threshold (seconds).  Floor-clamped so an
+        # over-aggressive config can't false-positive on a single slow
+        # buffer refill.
+        pump_threshold = float(
+            tangle_pump_threshold_s if tangle_pump_threshold_s is not None
+            else self.DEFAULT_TANGLE_PUMP_THRESHOLD_S
+        )
+        if pump_threshold < self.TANGLE_PUMP_THRESHOLD_FLOOR_S:
+            logging.warning(
+                "ACE: tangle_pump_threshold_s=%.1f below floor %.1f; "
+                "clamping",
+                pump_threshold, self.TANGLE_PUMP_THRESHOLD_FLOOR_S,
+            )
+            pump_threshold = self.TANGLE_PUMP_THRESHOLD_FLOOR_S
+        self.tangle_pump_threshold_s = pump_threshold
 
         # Distance-window parameters with hard floors / ceilings.
         window_mm = float(
@@ -208,7 +251,7 @@ class RunoutMonitor:
         self._extruder = None
         self._estimated_print_time = None
 
-        # --- Distance-window state ---
+        # --- Distance-window state (legacy detector) ---
         # Samples: list of (eventtime, cum_extrude_mm, cum_encoder_pulse)
         # tuples.  We only ever keep enough samples to span tangle_window_
         # extrude_mm — the oldest entries get popped as the window slides.
@@ -217,6 +260,19 @@ class RunoutMonitor:
         self._dw_cum_extrude = 0.0           # monotonic forward-only sum
         self._dw_last_extruder_pos = None    # for computing dext per tick
         self._dw_tick_counter = 0            # for evaluate-every-N gating
+
+        # --- pump_time detector state ---
+        # We watch cont_assist_time monotonically grow.  When it crosses
+        # tangle_pump_threshold_s the trigger fires.  When ACE resets it
+        # to 0 (because the pump cycle ended — successfully or not) we
+        # latch a "saw a reset" so the next growth can fire again.
+        self._pt_last_value_s = 0.0
+        # Time the current monotonic-growth phase started, in reactor
+        # eventtime.  None when we've seen a reset and are waiting for
+        # the next pump cycle.
+        self._pt_phase_start_eventtime = None
+        # Counter for the PUMP_END klippy.log marker.
+        self._pt_pump_cycles_logged = 0
 
         # --- Read-only baseline telemetry ---
         self.tangle_debug = bool(tangle_debug)
@@ -684,89 +740,172 @@ class RunoutMonitor:
     def _check_tangle(self, eventtime, current_tool):
         """Dispatcher: route to the configured tangle detection mode.
 
-        The shared pre-conditions (feed-assist active, both sensors
-        present, RDM encoder available) live in the per-mode methods so
-        each can record its own debug breadcrumbs into the telemetry log.
+        The shared pre-conditions live in the per-mode methods so each
+        can record its own debug breadcrumbs into the telemetry log.
         """
         if self.tangle_detection_mode == "off":
             return
-        if self.tangle_detection_mode == "simple":
-            self._check_tangle_simple(eventtime, current_tool)
+        if self.tangle_detection_mode == "distance_window":
+            # Legacy encoder-vs-extruder detector.  Kept for hardware
+            # where the ACE doesn't report cont_assist_time and for
+            # diagnostic comparison runs.
+            self._check_tangle_distance_window(eventtime, current_tool)
             return
-        # Default + future expansion point.
-        self._check_tangle_distance_window(eventtime, current_tool)
+        # Default: pump_time — uses ACE-reported cont_assist_time as a
+        # direct, encoder-independent tangle signal.
+        self._check_tangle_pump_time(eventtime, current_tool)
 
-    def _check_tangle_simple(self, eventtime, current_tool):
-        """Legacy point-to-point tangle check.
+    def _check_tangle_pump_time(self, eventtime, current_tool):
+        """Pump-time tangle detector — the primary mode.
 
-        Tangle is declared when ALL of the following are true:
-            1. Print state is "printing" (already guaranteed by caller)
-            2. ACE feed-assist is active
-            3. RDM detect pin shows filament present
-            4. Nozzle sensor shows filament present
-            5. Extruder moved >= TANGLE_DETECTION_LENGTH since last reset
-            6. RDM encoder pulse count has NOT changed since last reset
+        Watches the ACE-reported cont_assist_time field.  Normal
+        buffer-refill bursts last 0.1–0.3 s; an unblocked extruder never
+        holds the pump open for multiple seconds.  When cont_assist_time
+        exceeds tangle_pump_threshold_s, ACE has been pumping
+        continuously against resistance — a tangle (or filament blocked
+        in the spool / pre-gate path) is the only physical explanation
+        on a working ACE.
 
-        When any condition fails, the detection window is reset so we
-        never accumulate stale state.  See PLAN-tangle-detection.md
-        section 1 for why this mode is unsuitable for long Bowdens.
+        Pre-conditions (any False ⇒ noop):
+            * ACE feed-assist active (i.e. we're actually using the ACE)
+            * Both filament sensors present (RDM + toolhead) — otherwise
+              an in-flight runout would shadow the tangle signal
+
+        Encoder-independent — does NOT read RDM encoder pulses or
+        extruder position for the trigger decision.  The encoder is
+        captured by the telemetry layer for offline forensics.
         """
-        # Condition 2: feed-assist must be active
+        # Pre-conditions
         if not self.manager.is_feed_assist_active():
-            if self.tangle_debug and self._tangle_runout_pos is not None:
-                self._tlm_pending_simple_event = "ABORT:feed_assist_lost"
-            self._tangle_runout_pos = None
+            self._pt_reset_phase()
             return
-
-        # Condition 3: RDM sensor shows filament present
         if not self.manager.get_switch_state(SENSOR_RDM):
-            if self.tangle_debug and self._tangle_runout_pos is not None:
-                self._tlm_pending_simple_event = "ABORT:rdm_cleared"
-            self._tangle_runout_pos = None
+            self._pt_reset_phase()
             return
-
-        # Condition 4: Nozzle sensor shows filament present
         if not self.manager.get_switch_state(SENSOR_TOOLHEAD):
-            if self.tangle_debug and self._tangle_runout_pos is not None:
-                self._tlm_pending_simple_event = "ABORT:toolhead_cleared"
-            self._tangle_runout_pos = None
+            self._pt_reset_phase()
             return
 
-        # Get current encoder pulse count from RDM tracker
-        current_encoder = self.manager.get_rdm_encoder_pulse()
-        if current_encoder is None:
-            # RDM is not a filament_tracker — cannot do tangle detection
+        current = self._get_ace_cont_assist_time()
+        if current is None:
+            # ACE didn't report the field — this firmware/protocol
+            # doesn't expose cont_assist_time.  Caller should pick
+            # distance_window mode instead.  Silent noop here so we
+            # don't spam logs.
             return
 
-        # Initialize window if not set
-        if self._tangle_runout_pos is None:
-            self._reset_tangle_window(eventtime)
+        prev = self._pt_last_value_s
+        self._pt_last_value_s = current
+
+        # Reset detection: value dropped (ACE finished/aborted a pump
+        # cycle).  Latch a PUMP_END marker for the klippy.log if we had
+        # been tracking a phase that crossed the marker threshold.
+        if current < prev:
+            if (self.tangle_debug
+                    and self._pt_phase_start_eventtime is not None
+                    and prev >= 1.0):
+                # Only log meaningful cycles; sub-second pumps are noise.
+                duration = prev
+                self._pt_pump_cycles_logged += 1
+                try:
+                    self.gcode.respond_info(
+                        "ACE: tangle-tlm PUMP_END t=%.2f duration=%.1fs "
+                        "cycles_seen=%d"
+                        % (eventtime, duration, self._pt_pump_cycles_logged)
+                    )
+                except Exception:
+                    pass
+            self._pt_phase_start_eventtime = None
             return
 
-        # Condition 6: If encoder has moved, filament is flowing — reset window
-        if current_encoder != self._tangle_encoder_snapshot:
-            self._reset_tangle_window(eventtime)
+        # No growth — idle, nothing to do
+        if current <= 0.0:
+            self._pt_phase_start_eventtime = None
             return
 
-        # Condition 5: Check extruder position
-        if not self._resolve_extruder():
-            return
-        extruder_pos = self._get_extruder_pos(eventtime)
-        if extruder_pos < self._tangle_runout_pos:
-            # Extruder hasn't moved far enough yet — no tangle
+        # Growth phase: first tick where value rose from 0
+        if self._pt_phase_start_eventtime is None:
+            self._pt_phase_start_eventtime = eventtime
+            if self.tangle_debug:
+                try:
+                    self.gcode.respond_info(
+                        "ACE: tangle-tlm PUMP_START t=%.2f cont_assist_time=%.1fs"
+                        % (eventtime, current)
+                    )
+                except Exception:
+                    pass
             return
 
-        # ===== ALL 6 CONDITIONS MET — TANGLE DETECTED =====
-        if self.tangle_debug:
-            self._tlm_pending_simple_event = "TANGLE_FIRED"
-        logging.warning(
-            "ACE: TANGLE DETECTED on T%d — extruder at %.1f mm "
-            "(window was %.1f mm), encoder stuck at %d pulses",
-            current_tool, extruder_pos,
-            self._tangle_runout_pos - self.tangle_detection_length,
-            current_encoder,
-        )
-        self._handle_tangle_detected(current_tool)
+        # Crossed the trigger threshold
+        if current >= self.tangle_pump_threshold_s:
+            logging.warning(
+                "ACE: TANGLE DETECTED (pump_time) on T%d — "
+                "cont_assist_time=%.1fs >= threshold %.1fs "
+                "(ACE pumping continuously against resistance)",
+                current_tool, current, self.tangle_pump_threshold_s,
+            )
+            # Wipe state so a manual resume doesn't immediately re-fire
+            # on a still-pumping ACE.
+            self._pt_phase_start_eventtime = None
+            self._pt_last_value_s = 0.0
+            self._handle_tangle_detected(current_tool)
+
+    def _pt_reset_phase(self):
+        """Forget any in-flight pump phase tracking.  Called when
+        pre-conditions fail (e.g. feed-assist disabled, sensor cleared).
+        """
+        self._pt_phase_start_eventtime = None
+        # last_value_s left alone — it tracks the last seen ACE value,
+        # used for change detection on resume.
+
+    def _get_ace_cont_assist_time(self):
+        """Return the ACE-reported cont_assist_time (seconds) for the
+        active instance, or None when the device hasn't reported it.
+
+        Reads from instance._info, populated unconditionally on every
+        heartbeat by AceInstance._status_update_callback.  Defensive —
+        never raises.
+        """
+        try:
+            instances = getattr(self.manager, "instances", None) or []
+            for inst in instances:
+                if getattr(inst, "_feed_assist_index", -1) < 0:
+                    continue
+                info = getattr(inst, "_info", None) or {}
+                val = info.get("cont_assist_time") if isinstance(info, dict) else None
+                if val is not None:
+                    return float(val)
+            # Fallback: first instance that reports the field
+            for inst in instances:
+                info = getattr(inst, "_info", None) or {}
+                val = info.get("cont_assist_time") if isinstance(info, dict) else None
+                if val is not None:
+                    return float(val)
+        except Exception:
+            pass
+        return None
+
+    def _get_ace_feed_assist_count(self):
+        """Return the ACE-reported feed_assist_count (integer) for the
+        active instance, or None when the device hasn't reported it.
+        """
+        try:
+            instances = getattr(self.manager, "instances", None) or []
+            for inst in instances:
+                if getattr(inst, "_feed_assist_index", -1) < 0:
+                    continue
+                info = getattr(inst, "_info", None) or {}
+                val = info.get("feed_assist_count") if isinstance(info, dict) else None
+                if val is not None:
+                    return int(val)
+            for inst in instances:
+                info = getattr(inst, "_info", None) or {}
+                val = info.get("feed_assist_count") if isinstance(info, dict) else None
+                if val is not None:
+                    return int(val)
+        except Exception:
+            pass
+        return None
 
     def _dw_wipe_state(self):
         """Reset the distance-window detector to a clean slate.
@@ -1221,7 +1360,8 @@ class RunoutMonitor:
                 "# Columns: eventtime tool encoder_pulse extruder_pos "
                 "d_encoder d_extruder print_state feed_assist rdm "
                 "toolhead simple_event layer toolchange filament_pos "
-                "ace_action mcu_count_raw ext_pwm\n"
+                "ace_action mcu_count_raw ext_pwm "
+                "cont_assist_time feed_assist_count\n"
             )
             self._tlm_resolved_log_path = path
             return True
@@ -1389,6 +1529,20 @@ class RunoutMonitor:
         mcu_count_raw = self._get_mcu_count_raw()
         ext_pwm = self._get_extruder_pwm(eventtime)
 
+        # ---- ACE feed-assist counters (added 2026-06-01) ----
+        # These two are the primary signal for the pump_time tangle
+        # detector.  Logged on every tick so post-print analysis can
+        # correlate pump bursts with print events.  "-" when ACE
+        # firmware doesn't report (older / non-Pro hardware).
+        cont_assist_time = self._get_ace_cont_assist_time()
+        feed_assist_count = self._get_ace_feed_assist_count()
+        cont_assist_str = (
+            f"{cont_assist_time:.1f}" if cont_assist_time is not None else "-"
+        )
+        feed_count_str = (
+            str(feed_assist_count) if feed_assist_count is not None else "-"
+        )
+
         # ---- Silence-marker emission ----
         # Track continuous d_encoder==0 stretches while actively printing.
         # When the stretch exceeds SILENCE_THRESHOLD_S AND the extruder
@@ -1457,7 +1611,8 @@ class RunoutMonitor:
                     f"{print_state}\t{feed_assist}\t{rdm}\t{toolhead}\t"
                     f"{simple_event}\t{current_layer}\t"
                     f"{toolchange}\t{filament_pos}\t"
-                    f"{ace_action}\t{mcu_count_raw}\t{ext_pwm:.2f}\n"
+                    f"{ace_action}\t{mcu_count_raw}\t{ext_pwm:.2f}\t"
+                    f"{cont_assist_str}\t{feed_count_str}\n"
                 )
             except Exception as e:
                 logging.warning(

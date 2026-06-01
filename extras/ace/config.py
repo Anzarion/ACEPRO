@@ -202,13 +202,20 @@ def read_ace_config(config):
     ace_config["tangle_detection_length"] = config.getfloat(
         "tangle_detection_length", 15.0
     )
-    # Distance-window detector parameters (the new default mode).  See
-    # PLAN-tangle-detection.md for the rationale and config/voron/
-    # acepro_setting.cfg for user-facing documentation.  RunoutMonitor
-    # has its own validation (clamp / fallback) for out-of-range values.
+    # Tangle detector configuration.  pump_time is the new default — it
+    # uses the ACE-reported cont_assist_time field as a direct tangle
+    # signal, completely independent of the RDM encoder.  distance_window
+    # is kept as a legacy fallback for hardware that doesn't report
+    # cont_assist_time.  RunoutMonitor validates and clamps out-of-range
+    # values.  See PLAN-tangle-detection.md for the rationale.
     ace_config["tangle_detection_mode"] = config.get(
-        "tangle_detection_mode", "distance_window"
+        "tangle_detection_mode", "pump_time"
     )
+    # pump_time parameters
+    ace_config["tangle_pump_threshold_s"] = config.getfloat(
+        "tangle_pump_threshold_s", 4.0
+    )
+    # distance_window parameters (legacy)
     ace_config["tangle_window_extrude_mm"] = config.getfloat(
         "tangle_window_extrude_mm", 30.0
     )
