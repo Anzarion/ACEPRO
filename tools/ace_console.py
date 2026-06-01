@@ -109,6 +109,9 @@ def main():
     parser.add_argument("--count", type=int, default=0, help="Number of status polls before exit (0 = infinite)")
     parser.add_argument("--full", action="store_true", help="Dump full JSON on EVERY poll (default: only on first poll + on field-set changes)")
     parser.add_argument("--feed-test", type=int, default=-1, help="Run feed_assist on this slot index in parallel (provokes tangle response when filament blocked)")
+    parser.add_argument("--push-slot", type=int, default=-1, help="Issue feed_filament on this slot — ACE actively pumps regardless of buffer state, exposing tangle response")
+    parser.add_argument("--push-length", type=int, default=500, help="Length in mm for --push-slot (default 500)")
+    parser.add_argument("--push-speed", type=int, default=15, help="Speed in mm/s for --push-slot (default 15)")
     args = parser.parse_args()
 
     print(f"Connecting to {args.port} @ {args.baud} baud...")
@@ -148,6 +151,26 @@ def main():
         print(f"[start_feed_assist] {json.dumps(response, indent=2) if response else 'TIMEOUT'}\n")
         print("Provoke the tangle now (block the spool / clamp the bowden).")
         print("Watch for slot.status changes or new fields below.\n")
+
+    # --- optionally issue an active feed_filament push on a slot ---
+    # This is the tangle-probe path: ACE actively tries to push X mm of
+    # filament regardless of any buffer state, so if the spool is blocked
+    # or the gear can't bite, the firmware MUST report something.
+    if args.push_slot >= 0:
+        print(f"\n*** Issuing feed_filament: slot={args.push_slot} length={args.push_length}mm speed={args.push_speed}mm/s ***")
+        push_req = {
+            "method": "feed_filament",
+            "params": {
+                "index": args.push_slot,
+                "length": args.push_length,
+                "speed": args.push_speed,
+            },
+        }
+        response, buf = send_and_receive(ser, buf, push_req, req_id, timeout=5.0)
+        req_id += 1
+        print(f"[feed_filament] {json.dumps(response, indent=2) if response else 'TIMEOUT'}\n")
+        print("Block the filament path NOW — clamp the bowden or hold the spool.")
+        print("ACE should attempt to push and (hopefully) report tangle/stuck status.\n")
 
     # --- cyclic get_status ---
     print(f"Polling get_status every {args.interval}s  (Ctrl+C to stop)\n")
@@ -237,6 +260,15 @@ def main():
                 stop_req = {"method": "stop_feed_assist", "params": {"index": args.feed_test}}
                 response, buf = send_and_receive(ser, buf, stop_req, req_id, timeout=2.0)
                 print(f"[stop_feed_assist] {json.dumps(response, indent=2) if response else 'TIMEOUT'}")
+            except Exception:
+                pass
+        # Best-effort: stop active push if we issued one
+        if args.push_slot >= 0:
+            try:
+                print(f"\nStopping feed_filament on slot {args.push_slot}...")
+                stop_req = {"method": "stop_feed_filament", "params": {"index": args.push_slot}}
+                response, buf = send_and_receive(ser, buf, stop_req, req_id, timeout=2.0)
+                print(f"[stop_feed_filament] {json.dumps(response, indent=2) if response else 'TIMEOUT'}")
             except Exception:
                 pass
         ser.close()
