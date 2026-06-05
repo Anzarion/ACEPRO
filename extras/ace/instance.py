@@ -128,6 +128,7 @@ class AceInstance:
         self._status_recovery_in_progress = False
 
         self.status_debug_logging = bool(ace_config.get("status_debug_logging", False))
+        self.ace_debug = bool(ace_config.get("ace_debug", False))
         self.supervision_enabled = bool(ace_config.get("ace_connection_supervision", True))
         self.configured_protocol_name = normalize_protocol_name(
             ace_config.get("protocol", "auto")
@@ -143,6 +144,7 @@ class AceInstance:
             instance_num,
             ace_enabled=ace_enabled,
             status_debug_logging=self.status_debug_logging,
+            ace_debug=self.ace_debug,
             supervision_enabled=self.supervision_enabled,
             protocol=self.protocol,
         )

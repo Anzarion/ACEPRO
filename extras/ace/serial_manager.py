@@ -37,6 +37,7 @@ class AceSerialManager:
             instance_num=0,
             ace_enabled=True,
             status_debug_logging=False,
+            ace_debug=False,
             supervision_enabled=True,
             protocol=None):
         """
@@ -48,6 +49,7 @@ class AceSerialManager:
             instance_num: ACE instance number for logging
             ace_enabled: Initial ACE Pro enabled state
             status_debug_logging: Enable detailed status logging for debugging
+            ace_debug: When True, GET_INFO etc. go to console; when False, only to log
             supervision_enabled: Enable communication health supervision
         """
         self._port = None
@@ -102,7 +104,12 @@ class AceSerialManager:
 
         self._ace_pro_enabled = ace_enabled
         self._status_debug_logging = bool(status_debug_logging)
+        self._ace_debug = bool(ace_debug)
         self._supervision_enabled = bool(supervision_enabled)
+        # Helper: log to console only when ace_debug is True, always to klippy.log
+        self._debug_msg = (
+            lambda msg: self.gcode.respond_info(msg) if self._ace_debug else logging.info(msg)
+        )
         # Human-readable connection state for KlipperScreen UI
         self.connection_state = "disabled" if not ace_enabled else "initializing"
         # Latest device info response (model/firmware/etc.)
@@ -473,7 +480,7 @@ class AceSerialManager:
         self._reconnect_timestamps = [t for t in self._reconnect_timestamps if t > cutoff]
 
         recent_count = len(self._reconnect_timestamps)
-        self.gcode.respond_info(
+        logging.info(
             f'ACE[{self.instance_num}]: (Re)connecting '
             f'({recent_count} reconnects in last {int(self.INSTABILITY_WINDOW)}s)'
         )
@@ -482,7 +489,7 @@ class AceSerialManager:
 
         # Use provided delay parameter, or default to current backoff
         initial_delay = delay if delay is not None else self._reconnect_backoff
-        self.gcode.respond_info(f'ACE[{self.instance_num}]: Scheduling reconnect in {initial_delay:.0f}s')
+        logging.info(f'ACE[{self.instance_num}]: Scheduling reconnect in {initial_delay:.0f}s')
 
         def _reconnect_callback(eventtime):
             if not self._ace_pro_enabled:
@@ -520,7 +527,7 @@ class AceSerialManager:
                 )
                 return eventtime + current_backoff
 
-        self.gcode.respond_info(
+        logging.info(
             f'ACE[{self.instance_num}]: Scheduling reconnect in {initial_delay:.0f}s'
         )
         self.connect_timer = self.reactor.register_timer(
@@ -592,7 +599,7 @@ class AceSerialManager:
         port = getattr(self, "serial_name", None) or self._port or "unknown"
         topo = self._usb_location or "unknown"
         raw_info = json.dumps(response, sort_keys=True, default=str)
-        self.gcode.respond_info(
+        self._debug_msg(
             f"ACE[{self.instance_num}]: GET_INFO raw_info: {raw_info} (port={port}, usb={topo})"
         )
 
@@ -602,7 +609,7 @@ class AceSerialManager:
 
         raw_fields = result.get("raw_fields")
         if raw_fields is not None:
-            self.gcode.respond_info(
+            self._debug_msg(
                 f"ACE[{self.instance_num}]: GET_INFO raw_fields: {raw_fields}"
             )
 
@@ -613,7 +620,7 @@ class AceSerialManager:
         code = response.get("code", "n/a") if isinstance(response, dict) else "n/a"
         msg = response.get("msg", "n/a") if isinstance(response, dict) else "n/a"
 
-        self.gcode.respond_info(
+        self._debug_msg(
             "ACE[%s]: GET_INFO summary: model=%s fw=%s boot=%s code=%s msg=%s (port=%s usb=%s)"
             % (
                 self.instance_num,
@@ -637,21 +644,13 @@ class AceSerialManager:
         self._log_info_response(response)
 
     def connect(self, port, baud):
-        """
+        """Connect to ACE on the given serial port.
+
+        Args:
             port: Serial port path (e.g., "/dev/ttyACM0")
             baud: Baud rate
 
         Returns:
-
-        self.gcode.respond_info(
-            f"ACE[{self.instance_num}]: GET_INFO raw_info: {response} (port={port}, usb={topo})"
-        )
-
-        raw_fields = result.get("raw_fields")
-        if raw_fields is not None:
-            self.gcode.respond_info(
-                f"ACE[{self.instance_num}]: GET_INFO raw_fields: {raw_fields}"
-            )
             bool: True if successfully connected
         """
         try:
@@ -1267,7 +1266,10 @@ class AceSerialManager:
             raw = self._serial.read(size=4096)
         except SerialException:
             self.gcode.respond_info(
-                f"ACE[{self.instance_num}]: Unable to communicate with ACE\n" +
+                f"ACE[{self.instance_num}]: Unable to communicate with ACE"
+            )
+            logging.info(
+                f"ACE[{self.instance_num}]: Serial exception detail:\n" +
                 traceback.format_exc()
             )
 
@@ -1279,11 +1281,11 @@ class AceSerialManager:
 
             # Try to reconnect
             if self.connect_timer is None:
-                self.gcode.respond_info(f"ACE[{self.instance_num}]: Scheduling reconnect")
+                logging.info(f"ACE[{self.instance_num}]: Scheduling reconnect")
                 self.reconnect()
                 return self.reactor.NOW + 1.5
             else:
-                self.gcode.respond_info(
+                logging.info(
                     f"ACE[{self.instance_num}]: Scheduling reconnect (already scheduled)"
                 )
             return self.reactor.NEVER

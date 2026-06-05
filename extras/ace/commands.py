@@ -1094,16 +1094,16 @@ def cmd_ACE_QUERY_SLOTS(gcmd):
 
 
 def _sync_tangle_detection(manager, enabled):
-    """Set both the python flag and [output_pin TANGLE_DETECTION] (if configured) so the slider never lies about the runtime state."""
+    """Set both the python flag and [output_pin _TANGLE_DETECTION] (if configured) so the slider never lies about the runtime state."""
     try:
         pin = manager.printer.lookup_object(
-            "output_pin TANGLE_DETECTION", None
+            "output_pin _TANGLE_DETECTION", None
         )
     except Exception:
         pin = None
     if pin is not None:
         manager.gcode.run_script_from_command(
-            f"SET_PIN PIN=TANGLE_DETECTION VALUE={1.0 if enabled else 0.0}"
+            f"SET_PIN PIN=_TANGLE_DETECTION VALUE={1.0 if enabled else 0.0}"
         )
     manager.runout_monitor.set_tangle_detection_enabled(enabled)
 
@@ -1319,7 +1319,11 @@ def cmd_ACE_DEBUG(gcmd):
     def callback(response):
         # Some protocol debug payloads contain raw bytes (e.g. raw_fields).
         # Use default=str so debug output never crashes callback handling.
-        gcmd.respond_info(f"Debug response: {json.dumps(response, default=str)}")
+        msg = f"Debug response: {json.dumps(response, default=str)}"
+        if ace.ace_debug:
+            gcmd.respond_info(msg)
+        else:
+            logging.info("ACE: %s", msg)
 
     request = ace.protocol.build_debug_request(method, params)
     ace.send_request(request, callback)

@@ -231,6 +231,7 @@ class AceManager:
             runout_debounce_count=self.ace_config.get("runout_debounce_count", 1),
             tangle_detection=self.ace_config.get("tangle_detection", False),
             tangle_pump_time=self.ace_config.get("tangle_pump_time", 4.0),
+            ace_debug=self.ace_config.get("ace_debug", False),
         )
 
         self.toolchange_in_progress = False
@@ -2810,6 +2811,7 @@ class AceManager:
                 instance_num,
                 ace_enabled=ace_enabled,
                 status_debug_logging=bool(instance_config.get("status_debug_logging", False)),
+                ace_debug=bool(instance_config.get("ace_debug", False)),
                 supervision_enabled=bool(instance_config.get("ace_connection_supervision", True)),
                 protocol=protocol,
             )

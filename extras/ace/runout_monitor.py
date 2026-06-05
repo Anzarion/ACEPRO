@@ -32,7 +32,7 @@ class RunoutMonitor:
 
     def __init__(self, printer, gcode, reactor, endless_spool, manager,
                  runout_debounce_count=1, tangle_detection=False,
-                 tangle_pump_time=None):
+                 tangle_pump_time=None, ace_debug=False):
         """Initialize runout monitor.
 
         Args:
@@ -54,6 +54,7 @@ class RunoutMonitor:
 
         self.runout_debounce_count = max(1, int(runout_debounce_count))
         self._runout_false_count = 0
+        self._ace_debug = bool(ace_debug)
 
         self.prev_toolhead_sensor_state = None
         self.last_printing_active = False
@@ -204,7 +205,7 @@ class RunoutMonitor:
         self.monitor_debug_counter += 1
         if self.monitor_debug_counter >= 1200 * 15:
             self.monitor_debug_counter = 0
-            self.gcode.respond_info(
+            msg = (
                 f"ACE: Monitor - Tool: T{current_tool}, "
                 f"Printing: {is_printing} ({raw_print_state}), "
                 f"Prev sensor: {self.prev_toolhead_sensor_state}, "
@@ -214,6 +215,10 @@ class RunoutMonitor:
                 f"Runout handling: {self.runout_handling_in_progress}, "
                 f"Debounce: {self._runout_false_count}/{self.runout_debounce_count}"
             )
+            if self._ace_debug:
+                self.gcode.respond_info(msg)
+            else:
+                logging.info(msg)
 
             # For debugging: Auto-recovery check
             # WARN if detection should be active but isn't
@@ -379,7 +384,7 @@ class RunoutMonitor:
     def _is_tangle_detection_active(self):
         """True when the detector should run this cycle.
 
-        [output_pin TANGLE_DETECTION] is authoritative when configured —
+        [output_pin _TANGLE_DETECTION] is authoritative when configured —
         the slider IS the runtime control, so command and slider stay
         consistent regardless of which side toggles.  Without the pin,
         the python flag (tangle_detection config / ACE_TANGLE_DETECTION
@@ -387,7 +392,7 @@ class RunoutMonitor:
         """
         try:
             pin = self.printer.lookup_object(
-                "output_pin TANGLE_DETECTION", None
+                "output_pin _TANGLE_DETECTION", None
             )
         except Exception:
             pin = None
