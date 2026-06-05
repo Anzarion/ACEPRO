@@ -2089,6 +2089,9 @@ def cmd_ACE_SHOW_INSTANCE_CONFIG(gcmd):
                 f"  {'filament_runout_sensor_name_rdm':40s}: {instance.filament_runout_sensor_name_rdm}"
             )
             gcmd.respond_info(
+                f"  {'filament_runout_sensor_name_toolhead':40s}: {instance.filament_runout_sensor_name_toolhead}"
+            )
+            gcmd.respond_info(
                 f"  {'filament_runout_sensor_name_nozzle':40s}: {instance.filament_runout_sensor_name_nozzle}"
             )
             gcmd.respond_info(
@@ -2193,6 +2196,9 @@ def cmd_ACE_SHOW_INSTANCE_CONFIG(gcmd):
             gcmd.respond_info(f"  {'baud':40s}: {instance.baud}")
             gcmd.respond_info(
                 f"  {'filament_runout_sensor_name_rdm':40s}: {instance.filament_runout_sensor_name_rdm}"
+            )
+            gcmd.respond_info(
+                f"  {'filament_runout_sensor_name_toolhead':40s}: {instance.filament_runout_sensor_name_toolhead}"
             )
             gcmd.respond_info(
                 f"  {'filament_runout_sensor_name_nozzle':40s}: {instance.filament_runout_sensor_name_nozzle}"

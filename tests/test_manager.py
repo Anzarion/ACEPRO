@@ -78,7 +78,8 @@ class TestAceManagerInitialization(unittest.TestCase):
         """Mock config.get()."""
         config_values = {
             'filament_runout_sensor_name_rdm': 'return_module',
-            'filament_runout_sensor_name_nozzle': 'toolhead_sensor',
+            'filament_runout_sensor_name_toolhead': 'toolhead_sensor',
+            'filament_runout_sensor_name_nozzle': None,
         }
         return config_values.get(key, default)
 
@@ -206,7 +207,8 @@ class TestGlobalEnableDisable(unittest.TestCase):
     def _mock_config_get(self, key, default=None):
         config_values = {
             'filament_runout_sensor_name_rdm': 'return_module',
-            'filament_runout_sensor_name_nozzle': 'toolhead_sensor',
+            'filament_runout_sensor_name_toolhead': 'toolhead_sensor',
+            'filament_runout_sensor_name_nozzle': None,
         }
         return config_values.get(key, default)
 
@@ -326,7 +328,8 @@ class TestHandleReady(unittest.TestCase):
         def get(key, default=None):
             return {
                 "filament_runout_sensor_name_rdm": "return_module",
-                "filament_runout_sensor_name_nozzle": "toolhead_sensor",
+                "filament_runout_sensor_name_toolhead": "toolhead_sensor",
+                "filament_runout_sensor_name_nozzle": None,
             }.get(key, default)
 
         def getboolean(key, default=None):
@@ -349,7 +352,8 @@ class TestHandleReady(unittest.TestCase):
         inst.tool_offset = instance_num * SLOTS_PER_ACE
         inst.baud = instance_config["baud"]
         inst.serial_mgr = kwargs.get("serial_mgr", Mock(connect_to_ace=Mock(), disconnect=Mock()))
-        inst.filament_runout_sensor_name_nozzle = "toolhead_sensor"
+        inst.filament_runout_sensor_name_toolhead = "toolhead_sensor"
+        inst.filament_runout_sensor_name_nozzle = None
         inst.filament_runout_sensor_name_rdm = "return_module"
         return inst
 
@@ -451,7 +455,8 @@ class TestSharedAce2Transport(unittest.TestCase):
         def get(key, default=None):
             return {
                 "filament_runout_sensor_name_rdm": "return_module",
-                "filament_runout_sensor_name_nozzle": "toolhead_sensor",
+                "filament_runout_sensor_name_toolhead": "toolhead_sensor",
+                "filament_runout_sensor_name_nozzle": None,
                 "protocol": "ace2",
                 "baud": "auto",
             }.get(key, default)
@@ -489,7 +494,8 @@ class TestSharedAce2Transport(unittest.TestCase):
         inst.bus_session = kwargs.get("bus_session")
         inst.protocol = kwargs.get("protocol")
         inst.rfid_inventory_sync_enabled = True
-        inst.filament_runout_sensor_name_nozzle = "toolhead_sensor"
+        inst.filament_runout_sensor_name_toolhead = "toolhead_sensor"
+        inst.filament_runout_sensor_name_nozzle = None
         inst.filament_runout_sensor_name_rdm = "return_module"
         return inst
 
@@ -798,7 +804,8 @@ class TestPrepareToolheadForFilamentRetraction(unittest.TestCase):
         def get(key, default=None):
             return {
                 "filament_runout_sensor_name_rdm": "return_module",
-                "filament_runout_sensor_name_nozzle": "toolhead_sensor",
+                "filament_runout_sensor_name_toolhead": "toolhead_sensor",
+                "filament_runout_sensor_name_nozzle": None,
             }.get(key, default)
 
         def getboolean(key, default=None):
@@ -931,7 +938,8 @@ class TestSensorMonitoring(unittest.TestCase):
     def _mock_config_get(self, key, default=None):
         config_values = {
             'filament_runout_sensor_name_rdm': 'return_module',
-            'filament_runout_sensor_name_nozzle': 'toolhead_sensor',
+            'filament_runout_sensor_name_toolhead': 'toolhead_sensor',
+            'filament_runout_sensor_name_nozzle': None,
         }
         return config_values.get(key, default)
 
@@ -1094,7 +1102,8 @@ class TestConfigResolution(unittest.TestCase):
     def _mock_config_get(self, key, default=None):
         config_values = {
             'filament_runout_sensor_name_rdm': 'return_module',
-            'filament_runout_sensor_name_nozzle': 'toolhead_sensor',
+            'filament_runout_sensor_name_toolhead': 'toolhead_sensor',
+            'filament_runout_sensor_name_nozzle': None,
         }
         return config_values.get(key, default)
 
@@ -1386,7 +1395,8 @@ class TestAceEnableState(unittest.TestCase):
         """Mock config.get()."""
         config_values = {
             'filament_runout_sensor_name_rdm': 'return_module',
-            'filament_runout_sensor_name_nozzle': 'toolhead_sensor',
+            'filament_runout_sensor_name_toolhead': 'toolhead_sensor',
+            'filament_runout_sensor_name_nozzle': None,
         }
         return config_values.get(key, default)
 
@@ -1506,7 +1516,8 @@ class TestInventorySync(unittest.TestCase):
         """Mock config.get()."""
         config_values = {
             'filament_runout_sensor_name_rdm': 'return_module',
-            'filament_runout_sensor_name_nozzle': 'toolhead_sensor',
+            'filament_runout_sensor_name_toolhead': 'toolhead_sensor',
+            'filament_runout_sensor_name_nozzle': None,
         }
         return config_values.get(key, default)
 
@@ -1607,7 +1618,8 @@ class TestGetStatus(unittest.TestCase):
         """Mock config.get()."""
         config_values = {
             'filament_runout_sensor_name_rdm': 'return_module',
-            'filament_runout_sensor_name_nozzle': 'toolhead_sensor',
+            'filament_runout_sensor_name_toolhead': 'toolhead_sensor',
+            'filament_runout_sensor_name_nozzle': None,
         }
         return config_values.get(key, default)
 
@@ -1721,7 +1733,8 @@ class TestPerformToolChange(unittest.TestCase):
     def _mock_config_get(self, key, default=None):
         config_values = {
             'filament_runout_sensor_name_rdm': 'return_module',
-            'filament_runout_sensor_name_nozzle': 'toolhead_sensor',
+            'filament_runout_sensor_name_toolhead': 'toolhead_sensor',
+            'filament_runout_sensor_name_nozzle': None,
         }
         return config_values.get(key, default)
 
@@ -2618,7 +2631,8 @@ class TestConfigForTool(unittest.TestCase):
         """Mock config.get()."""
         config_values = {
             'filament_runout_sensor_name_rdm': 'return_module',
-            'filament_runout_sensor_name_nozzle': 'toolhead_sensor',
+            'filament_runout_sensor_name_toolhead': 'toolhead_sensor',
+            'filament_runout_sensor_name_nozzle': None,
         }
         return config_values.get(key, default)
 
@@ -2748,7 +2762,8 @@ class TestGetPrinter(unittest.TestCase):
         """Mock config.get()."""
         config_values = {
             'filament_runout_sensor_name_rdm': 'return_module',
-            'filament_runout_sensor_name_nozzle': 'toolhead_sensor',
+            'filament_runout_sensor_name_toolhead': 'toolhead_sensor',
+            'filament_runout_sensor_name_nozzle': None,
         }
         return config_values.get(key, default)
 
@@ -2845,7 +2860,8 @@ class TestIsFilamentPathFreeNoRDM(unittest.TestCase):
         """Mock config.get()."""
         config_values = {
             'filament_runout_sensor_name_rdm': 'return_module',
-            'filament_runout_sensor_name_nozzle': 'toolhead_sensor',
+            'filament_runout_sensor_name_toolhead': 'toolhead_sensor',
+            'filament_runout_sensor_name_nozzle': None,
         }
         return config_values.get(key, default)
 
@@ -2988,7 +3004,8 @@ class TestSmartUnload(unittest.TestCase):
         self.mock_config.getfloat.side_effect = getfloat
         self.mock_config.get.side_effect = lambda k, default=None: {
             "filament_runout_sensor_name_rdm": "return_module",
-            "filament_runout_sensor_name_nozzle": "toolhead_sensor",
+            "filament_runout_sensor_name_toolhead": "toolhead_sensor",
+            "filament_runout_sensor_name_nozzle": None,
         }.get(k, default)
 
     def _make_instance(self, instance_num=0):
@@ -3410,7 +3427,8 @@ class TestTurnOffHeaterIfIdle(unittest.TestCase):
         self.mock_config.getfloat.side_effect = getfloat
         self.mock_config.get.side_effect = lambda k, default=None: {
             "filament_runout_sensor_name_rdm": "return_module",
-            "filament_runout_sensor_name_nozzle": "toolhead_sensor",
+            "filament_runout_sensor_name_toolhead": "toolhead_sensor",
+            "filament_runout_sensor_name_nozzle": None,
         }.get(k, default)
 
     def _build_manager(self):
@@ -3535,7 +3553,8 @@ class TestUpdateAceSupportActiveState(unittest.TestCase):
         self.mock_config.getfloat.side_effect = getfloat
         self.mock_config.get.side_effect = lambda k, default=None: {
             "filament_runout_sensor_name_rdm": "return_module",
-            "filament_runout_sensor_name_nozzle": "toolhead_sensor",
+            "filament_runout_sensor_name_toolhead": "toolhead_sensor",
+            "filament_runout_sensor_name_nozzle": None,
         }.get(k, default)
         self.mock_config.getboolean.side_effect = lambda k, default=None: True
 
@@ -3703,7 +3722,8 @@ class TestIdentifyAndUnloadByCycling(unittest.TestCase):
         self.mock_config.getfloat.side_effect = getfloat
         self.mock_config.get.side_effect = lambda k, default=None: {
             "filament_runout_sensor_name_rdm": "return_module",
-            "filament_runout_sensor_name_nozzle": "toolhead_sensor",
+            "filament_runout_sensor_name_toolhead": "toolhead_sensor",
+            "filament_runout_sensor_name_nozzle": None,
         }.get(k, default)
         self.mock_config.getboolean.side_effect = lambda k, default=None: True
 
@@ -3855,7 +3875,8 @@ class TestConnectionIssueDialog(unittest.TestCase):
         self.mock_config.getfloat.side_effect = getfloat
         self.mock_config.get.side_effect = lambda k, default=None: {
             "filament_runout_sensor_name_rdm": "return_module",
-            "filament_runout_sensor_name_nozzle": "toolhead_sensor",
+            "filament_runout_sensor_name_toolhead": "toolhead_sensor",
+            "filament_runout_sensor_name_nozzle": None,
         }.get(k, default)
         self.mock_config.getboolean.side_effect = lambda k, default=None: True
 
@@ -3942,7 +3963,8 @@ class TestHandleConnectionIssue(unittest.TestCase):
         self.mock_config.getfloat.side_effect = getfloat
         self.mock_config.get.side_effect = lambda k, default=None: {
             "filament_runout_sensor_name_rdm": "return_module",
-            "filament_runout_sensor_name_nozzle": "toolhead_sensor",
+            "filament_runout_sensor_name_toolhead": "toolhead_sensor",
+            "filament_runout_sensor_name_nozzle": None,
         }.get(k, default)
         self.mock_config.getboolean.side_effect = lambda k, default=None: True
 
@@ -4050,7 +4072,8 @@ class TestSmartLoad(unittest.TestCase):
         self.mock_config.getfloat.side_effect = getfloat
         self.mock_config.get.side_effect = lambda k, default=None: {
             "filament_runout_sensor_name_rdm": "return_module",
-            "filament_runout_sensor_name_nozzle": "toolhead_sensor",
+            "filament_runout_sensor_name_toolhead": "toolhead_sensor",
+            "filament_runout_sensor_name_nozzle": None,
         }.get(k, default)
 
     def _make_instance(self, instance_num=0):
@@ -4292,7 +4315,8 @@ class TestMonitorAceState(unittest.TestCase):
         self.mock_config.getfloat.side_effect = getfloat
         self.mock_config.get.side_effect = lambda k, default=None: {
             "filament_runout_sensor_name_rdm": "return_module",
-            "filament_runout_sensor_name_nozzle": "toolhead_sensor",
+            "filament_runout_sensor_name_toolhead": "toolhead_sensor",
+            "filament_runout_sensor_name_nozzle": None,
         }.get(k, default)
 
     def _build_manager(self):
@@ -4416,7 +4440,8 @@ class TestFullUnloadSlot(unittest.TestCase):
         self.mock_config.getfloat.side_effect = getfloat
         self.mock_config.get.side_effect = lambda k, default=None: {
             "filament_runout_sensor_name_rdm": "return_module",
-            "filament_runout_sensor_name_nozzle": "toolhead_sensor",
+            "filament_runout_sensor_name_toolhead": "toolhead_sensor",
+            "filament_runout_sensor_name_nozzle": None,
         }.get(k, default)
 
     def _make_instance(self, instance_num=0):
@@ -4598,7 +4623,8 @@ class TestCheckAndWaitForSpoolReady(unittest.TestCase):
         self.mock_config.getfloat.side_effect = getfloat
         self.mock_config.get.side_effect = lambda k, default=None: {
             "filament_runout_sensor_name_rdm": "return_module",
-            "filament_runout_sensor_name_nozzle": "toolhead_sensor",
+            "filament_runout_sensor_name_toolhead": "toolhead_sensor",
+            "filament_runout_sensor_name_nozzle": None,
         }.get(k, default)
 
     def _make_instance(self):
@@ -4750,7 +4776,8 @@ class TestCheckConnectionHealth(unittest.TestCase):
         self.mock_config.getfloat.side_effect = getfloat
         self.mock_config.get.side_effect = lambda k, default=None: {
             "filament_runout_sensor_name_rdm": "return_module",
-            "filament_runout_sensor_name_nozzle": "toolhead_sensor",
+            "filament_runout_sensor_name_toolhead": "toolhead_sensor",
+            "filament_runout_sensor_name_nozzle": None,
         }.get(k, default)
 
     def _build_manager(self):
@@ -4872,7 +4899,8 @@ class TestExecuteCoordinatedRetraction(unittest.TestCase):
         self.mock_config.getfloat.side_effect = getfloat
         self.mock_config.get.side_effect = lambda k, default=None: {
             "filament_runout_sensor_name_rdm": "return_module",
-            "filament_runout_sensor_name_nozzle": "toolhead_sensor",
+            "filament_runout_sensor_name_toolhead": "toolhead_sensor",
+            "filament_runout_sensor_name_nozzle": None,
         }.get(k, default)
 
     def _build_manager(self, instance_factory):
@@ -5036,7 +5064,8 @@ class TestExtruderMove(unittest.TestCase):
         self.mock_config.getfloat.side_effect = getfloat
         self.mock_config.get.side_effect = lambda k, default=None: {
             "filament_runout_sensor_name_rdm": "return_module",
-            "filament_runout_sensor_name_nozzle": "toolhead_sensor",
+            "filament_runout_sensor_name_toolhead": "toolhead_sensor",
+            "filament_runout_sensor_name_nozzle": None,
         }.get(k, default)
         self.mock_config.getboolean.side_effect = lambda k, default=None: True
 
@@ -5157,7 +5186,8 @@ class TestCycleSlotsWithSensorCheck(unittest.TestCase):
         self.mock_config.getfloat.side_effect = getfloat
         self.mock_config.get.side_effect = lambda k, default=None: {
             "filament_runout_sensor_name_rdm": "return_module",
-            "filament_runout_sensor_name_nozzle": "toolhead_sensor",
+            "filament_runout_sensor_name_toolhead": "toolhead_sensor",
+            "filament_runout_sensor_name_nozzle": None,
         }.get(k, default)
 
     def _build_manager(self, instance_factory):
@@ -5834,7 +5864,8 @@ class TestSetupSensors(unittest.TestCase):
         instance.instance_num = 0
         instance.tool_offset = 0
         instance.SLOT_COUNT = 4
-        instance.filament_runout_sensor_name_nozzle = "toolhead_sensor"
+        instance.filament_runout_sensor_name_toolhead = "toolhead_sensor"
+        instance.filament_runout_sensor_name_nozzle = None
         instance.filament_runout_sensor_name_rdm = None
         instance.serial_mgr = Mock()
         instance.serial_mgr.connect_to_ace = Mock()
@@ -6169,7 +6200,8 @@ class TestMonitoring(unittest.TestCase):
         instance.instance_num = 0
         instance.tool_offset = 0
         instance.SLOT_COUNT = 4
-        instance.filament_runout_sensor_name_nozzle = "toolhead_sensor"
+        instance.filament_runout_sensor_name_toolhead = "toolhead_sensor"
+        instance.filament_runout_sensor_name_nozzle = None
         instance.filament_runout_sensor_name_rdm = None
         instance.serial_mgr = Mock()
         instance.serial_mgr.connect_to_ace = Mock()

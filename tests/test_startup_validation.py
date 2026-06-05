@@ -80,7 +80,8 @@ class TestValidateStartupToolState(unittest.TestCase):
         def get(key, default=None):
             return {
                 "filament_runout_sensor_name_rdm": "return_module",
-                "filament_runout_sensor_name_nozzle": "toolhead_sensor",
+                "filament_runout_sensor_name_toolhead": "toolhead_sensor",
+                "filament_runout_sensor_name_nozzle": None,
             }.get(key, default)
 
         def getboolean(key, default=None):
@@ -102,7 +103,8 @@ class TestValidateStartupToolState(unittest.TestCase):
         inst.SLOT_COUNT = SLOTS_PER_ACE
         inst.tool_offset = instance_num * SLOTS_PER_ACE
         inst.serial_mgr = kwargs.get("serial_mgr", Mock())
-        inst.filament_runout_sensor_name_nozzle = "toolhead_sensor"
+        inst.filament_runout_sensor_name_toolhead = "toolhead_sensor"
+        inst.filament_runout_sensor_name_nozzle = None
         inst.filament_runout_sensor_name_rdm = "return_module"
         inst.inventory = [{"status": "ready"} for _ in range(SLOTS_PER_ACE)]
         return inst

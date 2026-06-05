@@ -598,11 +598,12 @@ class TestReader:
         self.manager._serial.read = Mock(side_effect=boom)
         self.manager.connect_timer = None
 
-        ret = self.manager._reader(eventtime=0.0)
+        with patch.object(sm, "logging") as mock_log:
+            ret = self.manager._reader(eventtime=0.0)
 
         assert ret == self.mock_reactor.NOW + 1.5
         self.manager.reconnect.assert_called_once_with()
-        assert any("Scheduling reconnect" in args[0] for args, _ in self.mock_gcode.respond_info.call_args_list)
+        assert any("Scheduling reconnect" in args[0] for args, _ in mock_log.info.call_args_list)
 
     def test_serial_exception_already_scheduled_logs_and_stops(self):
         self.manager._ace_pro_enabled = True
@@ -613,11 +614,12 @@ class TestReader:
         self.manager._serial.read = Mock(side_effect=boom)
         self.manager.connect_timer = Mock()  # Not None, so already scheduled
 
-        ret = self.manager._reader(eventtime=0.0)
+        with patch.object(sm, "logging") as mock_log:
+            ret = self.manager._reader(eventtime=0.0)
 
         assert ret == self.mock_reactor.NEVER
         self.manager.reconnect.assert_not_called()
-        assert any("Scheduling reconnect (already scheduled)" in args[0] for args, _ in self.mock_gcode.respond_info.call_args_list)
+        assert any("Scheduling reconnect (already scheduled)" in args[0] for args, _ in mock_log.info.call_args_list)
 
     def test_empty_read_reschedules_timer(self):
         self.manager._serial.read.return_value = b""
@@ -2599,6 +2601,7 @@ class TestHandleInfoResponse:
             reactor=self.mock_reactor,
             instance_num=0,
             ace_enabled=False,
+            ace_debug=True,
         )
 
     def test_handle_info_response_updates_device_info(self):

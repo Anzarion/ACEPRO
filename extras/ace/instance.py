@@ -84,6 +84,7 @@ class AceInstance:
         self.gcode = printer.lookup_object("gcode")
         self.timeout_multiplier = ace_config["timeout_multiplier"]
         self.filament_runout_sensor_name_rdm = ace_config["filament_runout_sensor_name_rdm"]
+        self.filament_runout_sensor_name_toolhead = ace_config["filament_runout_sensor_name_toolhead"]
         self.filament_runout_sensor_name_nozzle = ace_config["filament_runout_sensor_name_nozzle"]
         self.feed_speed = float(ace_config["feed_speed"])
         self.retract_speed = float(ace_config["retract_speed"])

@@ -116,8 +116,12 @@ def read_ace_config(config):
     ace_config["filament_runout_sensor_name_rdm"] = config.get(
         "filament_runout_sensor_name_rdm", None
     )
+    ace_config["filament_runout_sensor_name_toolhead"] = config.get(
+        "filament_runout_sensor_name_toolhead", "filament_toolhead"
+    )
+    # Post-extruder sensor — confirms filament reached the nozzle (optional).
     ace_config["filament_runout_sensor_name_nozzle"] = config.get(
-        "filament_runout_sensor_name_nozzle", "filament_runout_nozzle"
+        "filament_runout_sensor_name_nozzle", None
     )
     ace_config["feed_assist_active_after_ace_connect"] = config.getboolean(
         "feed_assist_active_after_ace_connect", True

@@ -1251,20 +1251,20 @@ class TestDryingCommands:
         monitor.set_tangle_detection_enabled.assert_called_once_with(False)
 
     def test_cmd_ACE_TANGLE_DETECTION_with_pin_emits_SET_PIN(self, mock_gcmd, setup_mocks):
-        """When output_pin TANGLE_DETECTION exists, the slider gets flipped."""
+        """When output_pin _TANGLE_DETECTION exists, the slider gets flipped."""
         monitor = Mock()
         manager = INSTANCE_MANAGERS[0]
         manager.runout_monitor = monitor
         pin = Mock()
         manager.printer.lookup_object = Mock(side_effect=lambda n, d=None: (
-            pin if n == "output_pin TANGLE_DETECTION" else d
+            pin if n == "output_pin _TANGLE_DETECTION" else d
         ))
         manager.gcode.run_script_from_command.reset_mock()
         mock_gcmd.get_int = Mock(return_value=0)
         ace.commands.cmd_ACE_TANGLE_DETECTION(mock_gcmd)
         set_pin_calls = [
             c for c in manager.gcode.run_script_from_command.call_args_list
-            if "SET_PIN PIN=TANGLE_DETECTION" in str(c)
+            if "SET_PIN PIN=_TANGLE_DETECTION" in str(c)
         ]
         assert set_pin_calls, "expected SET_PIN emission to mirror slider"
         assert "VALUE=0.0" in str(set_pin_calls[0])
@@ -1292,12 +1292,12 @@ class TestDryingCommands:
         manager.runout_monitor = monitor
         pin = Mock()
         manager.printer.lookup_object = Mock(side_effect=lambda n, d=None: (
-            pin if n == "output_pin TANGLE_DETECTION" else d
+            pin if n == "output_pin _TANGLE_DETECTION" else d
         ))
         manager.gcode.run_script_from_command.reset_mock()
         ace.commands.cmd__ACE_TANGLE_DISABLE_AND_RESUME(mock_gcmd)
         calls = [str(c) for c in manager.gcode.run_script_from_command.call_args_list]
-        assert any("SET_PIN PIN=TANGLE_DETECTION" in c and "VALUE=0.0" in c
+        assert any("SET_PIN PIN=_TANGLE_DETECTION" in c and "VALUE=0.0" in c
                    for c in calls), "prompt button must lower the slider"
         assert any(c == "call('RESUME')" for c in calls)
 
@@ -1620,6 +1620,7 @@ class TestDryingCommands:
         # Add required attributes to mock instance
         ACE_INSTANCES[0].baud = 115200
         ACE_INSTANCES[0].filament_runout_sensor_name_rdm = "sensor_rdm"
+        ACE_INSTANCES[0].filament_runout_sensor_name_toolhead = "sensor_toolhead"
         ACE_INSTANCES[0].filament_runout_sensor_name_nozzle = "sensor_nozzle"
         ACE_INSTANCES[0].feed_assist_active_after_ace_connect = False
         ACE_INSTANCES[0].rfid_inventory_sync_enabled = False
@@ -1634,6 +1635,7 @@ class TestDryingCommands:
         # Add required attributes to mock instance
         ACE_INSTANCES[0].baud = 115200
         ACE_INSTANCES[0].filament_runout_sensor_name_rdm = "sensor_rdm"
+        ACE_INSTANCES[0].filament_runout_sensor_name_toolhead = "sensor_toolhead"
         ACE_INSTANCES[0].filament_runout_sensor_name_nozzle = "sensor_nozzle"
         ACE_INSTANCES[0].feed_assist_active_after_ace_connect = False
         ACE_INSTANCES[0].rfid_inventory_sync_enabled = False

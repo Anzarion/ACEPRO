@@ -289,7 +289,8 @@ class TestFeedAssistTopologyTracking:
         ace_config = {
             "baud": 115200,
             "filament_runout_sensor_name_rdm": "rdm_sensor",
-            "filament_runout_sensor_name_nozzle": "nozzle_sensor",
+            "filament_runout_sensor_name_toolhead": "nozzle_sensor",
+            "filament_runout_sensor_name_nozzle": None,
             "feed_speed": 8.0,
             "retract_speed": 10.0,
             "total_max_feeding_length": 900.0,
@@ -355,7 +356,8 @@ class TestFeedAssistRestoration:
         ace_config = {
             "baud": 115200,
             "filament_runout_sensor_name_rdm": "rdm_sensor",
-            "filament_runout_sensor_name_nozzle": "nozzle_sensor",
+            "filament_runout_sensor_name_toolhead": "nozzle_sensor",
+            "filament_runout_sensor_name_nozzle": None,
             "feed_speed": 8.0,
             "retract_speed": 10.0,
             "total_max_feeding_length": 900.0,
@@ -453,7 +455,8 @@ class TestReconnectionScenarios:
         ace_config = {
             "baud": 115200,
             "filament_runout_sensor_name_rdm": "rdm_sensor",
-            "filament_runout_sensor_name_nozzle": "nozzle_sensor",
+            "filament_runout_sensor_name_toolhead": "nozzle_sensor",
+            "filament_runout_sensor_name_nozzle": None,
             "feed_speed": 8.0,
             "retract_speed": 10.0,
             "total_max_feeding_length": 900.0,
@@ -528,7 +531,8 @@ class TestReconnectionScenarios:
         ace_config = {
             "baud": 115200,
             "filament_runout_sensor_name_rdm": "rdm_sensor",
-            "filament_runout_sensor_name_nozzle": "nozzle_sensor",
+            "filament_runout_sensor_name_toolhead": "nozzle_sensor",
+            "filament_runout_sensor_name_nozzle": None,
             "feed_speed": 8.0,
             "retract_speed": 10.0,
             "total_max_feeding_length": 900.0,

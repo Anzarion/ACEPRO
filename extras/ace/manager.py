@@ -475,7 +475,7 @@ class AceManager:
         instance = self.instances[0]
 
         # --- Toolhead sensor ---
-        toolhead_sensor_name = instance.filament_runout_sensor_name_nozzle
+        toolhead_sensor_name = instance.filament_runout_sensor_name_toolhead
         toolhead_resolved = False
 
         # Try standard filament_switch_sensor <name>
@@ -2356,6 +2356,15 @@ class AceManager:
                 if SENSOR_RDM in self.sensors
                 else None
             )
+            # Post-extruder sensor — read directly (not registered in self.sensors,
+            # so its enable/disable stays untouched). Confirms filament at the nozzle.
+            nozzle_sensor = None
+            post_name = self.instances[0].filament_runout_sensor_name_nozzle
+            if post_name:
+                obj = self.printer.lookup_object(
+                    "filament_switch_sensor %s" % post_name, None)
+                if obj is not None:
+                    nozzle_sensor = bool(obj.runout_helper.filament_present)
             return {
                 "ace_instances": len(self.instances),
                 "current_index": self.state.get("ace_current_index", -1),
@@ -2368,6 +2377,7 @@ class AceManager:
                 "ace_pro_enabled": bool(self._ace_pro_enabled),
                 "toolhead_sensor": toolhead_sensor,
                 "rdm_sensor": rdm_sensor,
+                "nozzle_sensor": nozzle_sensor,
             }
         except Exception:
             return {
@@ -2378,6 +2388,7 @@ class AceManager:
                 "ace_pro_enabled": False,
                 "toolhead_sensor": None,
                 "rdm_sensor": None,
+                "nozzle_sensor": None,
             }
 
     def _resolve_instance_config(self, instance_num):

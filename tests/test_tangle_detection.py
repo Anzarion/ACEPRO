@@ -285,14 +285,14 @@ class TestTangleInMonitorLoop:
 
 
 class TestOutputPinGate:
-    """[output_pin TANGLE_DETECTION] is authoritative when present; flag is fallback."""
+    """[output_pin _TANGLE_DETECTION] is authoritative when present; flag is fallback."""
 
     def _mount_pin(self, monitor, value):
         """Attach a fake output_pin via printer.lookup_object."""
         pin = Mock()
         pin.get_status.return_value = {"value": value}
         monitor.printer.lookup_object.side_effect = lambda name, default=None: (
-            pin if name == "output_pin TANGLE_DETECTION" else default
+            pin if name == "output_pin _TANGLE_DETECTION" else default
         )
         return pin
 
@@ -332,6 +332,6 @@ class TestOutputPinGate:
         pin = Mock()
         pin.get_status.side_effect = RuntimeError("boom")
         monitor.printer.lookup_object.side_effect = lambda name, default=None: (
-            pin if name == "output_pin TANGLE_DETECTION" else default
+            pin if name == "output_pin _TANGLE_DETECTION" else default
         )
         assert monitor._is_tangle_detection_active() is True
