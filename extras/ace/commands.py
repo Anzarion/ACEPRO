@@ -299,8 +299,12 @@ def cmd_ACE_GET_STATUS(gcmd):
 
                     # Get slot index for inventory lookup
                     slot_idx = slot.get('index')
+                    # An empty slot has no RFID identity -> suppress stale metadata that
+                    # the raw ACE status response can still carry (mirror the empty-slot
+                    # guard in instance.py get_status, which the panel/lane_sync use).
+                    slot_is_empty = str(slot.get('status', '')).lower() == 'empty'
                     inv_data = {}
-                    if ace_instance is not None and slot_idx is not None:
+                    if ace_instance is not None and slot_idx is not None and not slot_is_empty:
                         if 0 <= slot_idx < len(ace_instance.inventory):
                             inv_data = ace_instance.inventory[slot_idx]
 
@@ -314,12 +318,12 @@ def cmd_ACE_GET_STATUS(gcmd):
                         slot_handled.add('status')
                     if 'sku' in slot:
                         sku = slot['sku']
-                        if sku:  # Only show if not empty
+                        if sku and not slot_is_empty:  # only for occupied slots
                             slot_parts.append(f"sku={sku}")
                         slot_handled.add('sku')
                     if 'type' in slot:
                         slot_type = slot['type']
-                        if slot_type:  # Only show if not empty
+                        if slot_type and not slot_is_empty:  # only for occupied slots
                             slot_parts.append(f"type={slot_type}")
                         slot_handled.add('type')
                     if 'color' in slot:
@@ -347,7 +351,7 @@ def cmd_ACE_GET_STATUS(gcmd):
                     if 'colors' in slot:
                         # colors is an array of RGBA arrays - format compactly
                         colors = slot['colors']
-                        if isinstance(colors, list) and colors:
+                        if isinstance(colors, list) and colors and not slot_is_empty:
                             if len(colors) == 1 and len(colors[0]) >= 3:
                                 # Single color - show as RGBA
                                 c = colors[0]

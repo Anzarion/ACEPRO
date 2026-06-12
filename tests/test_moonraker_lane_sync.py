@@ -466,6 +466,9 @@ def test_lane_key_and_conversion_edge_cases():
 
     assert MoonrakerLaneSyncAdapter._extract_spool_id({"sku": 77}) == 77
     assert MoonrakerLaneSyncAdapter._extract_spool_id({"sku": "88"}) == 88
+    # FilaMan SKU VENDOR-MATERIAL-SPOOLID: trailing "-"-segment is the spool id
+    assert MoonrakerLaneSyncAdapter._extract_spool_id({"sku": "ESUN-PLA-1"}) == 1
+    assert MoonrakerLaneSyncAdapter._extract_spool_id({"sku": "ESUN-PLA-ORANGE"}) is None
     # "²" is digit-like but not parseable by int(), exercises exception path
     assert MoonrakerLaneSyncAdapter._extract_spool_id({"sku": "²"}) is None
 

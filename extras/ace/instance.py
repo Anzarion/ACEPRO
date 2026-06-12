@@ -35,6 +35,10 @@ class AceInstance:
     DEFAULT_COLOR = [0, 0, 0]
     DEFAULT_TEMP = 0
 
+    # Retry a failed get_filament_info query a few times (transient ACE/comms
+    # glitches), then back off until the slot is re-seated -> avoids per-poll spam.
+    MAX_RFID_QUERY_ATTEMPTS = 3
+
     # Material temperature defaults (from RFID tags)
     MATERIAL_TEMPS = {
         "PLA": 200,
@@ -121,6 +125,7 @@ class AceInstance:
         self._dryer_temperature = 0
         self._dryer_duration = 0
         self._pending_rfid_queries = set()  # Track slots with in-flight RFID queries
+        self._rfid_query_attempts = {}  # slot -> consecutive failed get_filament_info attempts
         self.status_failure_threshold = max(
             1,
             int(ace_config.get("status_failure_threshold", 4)),
@@ -271,6 +276,15 @@ class AceInstance:
         """Apply a get_filament_info response to the local inventory."""
         self._pending_rfid_queries.discard(slot_idx)
 
+        # Drop a response for a slot that is no longer occupied. The query may have
+        # been fired before the spool was removed, or unconditionally on reconnect;
+        # writing its (possibly ACE-cached) RFID data onto an empty slot would
+        # re-pollute the inventory after the empty-clear already ran.
+        if (0 <= slot_idx < self.SLOT_COUNT
+                and self.inventory[slot_idx].get("status")
+                == AceSlotStateMachineState.EMPTY.value):
+            return
+
         if response and response.get("code") == 0 and "result" in response:
             result = response["result"]
 
@@ -283,6 +297,7 @@ class AceInstance:
                     f"ACE[{self.instance_num}]: Slot {slot_idx} - No RFID tag (rfid={rfid_state}), "
                     f"skipping inventory update to preserve manual data"
                 )
+                self._note_rfid_query_failure(slot_idx)
                 return
 
             sku = result.get("sku", "")
@@ -358,6 +373,12 @@ class AceInstance:
                 if current is not None:
                     inv["current"] = current
 
+                # get_filament_info succeeded -> confirmed identified RFID tag. Mark
+                # rfid True from the *callback* (the source of truth, not the optimistic
+                # dispatch flag) and clear the retry counter.
+                inv["rfid"] = True
+                self._rfid_query_attempts.pop(slot_idx, None)
+
                 color_str = (
                     f"RGB({rfid_color[0]},{rfid_color[1]},{rfid_color[2]})"
                     if rfid_color else "none"
@@ -365,7 +386,8 @@ class AceInstance:
                 self.gcode.respond_info(
                     f"ACE[{self.instance_num}]: Slot {slot_idx} RFID full data -> "
                     f"sku={sku}, temp={rfid_temp}°C (min={temp_min}, max={temp_max}), "
-                    f"color={color_str}, hotbed={hotbed_temp}, brand={brand}"
+                    f"color={color_str}, hotbed={hotbed_temp}, brand={brand}, "
+                    f"total={total}, current={current}, diameter={diameter}"
                 )
 
                 if self.manager:
@@ -375,6 +397,17 @@ class AceInstance:
             self.gcode.respond_info(
                 f"ACE[{self.instance_num}]: get_filament_info failed for slot {slot_idx}: {msg}"
             )
+            self._note_rfid_query_failure(slot_idx)
+
+    def _note_rfid_query_failure(self, slot_idx):
+        """Record a failed get_filament_info query: clear the optimistic rfid flag so the
+        slot is not stuck "identified but blank", and bump the retry counter so the status
+        loop retries a few times (then backs off) instead of re-querying every poll."""
+        self._rfid_query_attempts[slot_idx] = self._rfid_query_attempts.get(slot_idx, 0) + 1
+        if 0 <= slot_idx < self.SLOT_COUNT:
+            self.inventory[slot_idx]["rfid"] = False
+        if self.manager:
+            self.manager._sync_inventory_to_persistent(self.instance_num, flush=False)
 
     def handle_shared_bus_filament_info_response(self, response):
         """Replay a late shared-bus get_filament_info reply if the slot is still pending."""
@@ -1615,6 +1648,7 @@ class AceInstance:
                                 "current"]:
                             self.inventory[idx].pop(key, None)
                         self._pending_rfid_queries.discard(idx)
+                        self._rfid_query_attempts.pop(idx, None)
 
                         # If NOT printing/paused, also clear material/color/temp to defaults
                         # (For endless spool/runout during printing, we preserve this info)
@@ -1635,7 +1669,9 @@ class AceInstance:
                             # Skip if query is already in-flight
                             query_pending = idx in self._pending_rfid_queries
 
-                            if not saved_rfid and not query_pending:
+                            if (not saved_rfid and not query_pending
+                                    and self._rfid_query_attempts.get(idx, 0)
+                                    < self.MAX_RFID_QUERY_ATTEMPTS):
                                 updated_rfid = True
                                 # Query get_filament_info - callback will populate all metadata
                                 self._query_rfid_full_data(idx)
@@ -1954,28 +1990,34 @@ class AceInstance:
         slots_out = []
         for i in range(self.SLOT_COUNT):
             inv = self.inventory[i]
+            slot_status = inv.get("status")
+            is_empty = slot_status == AceSlotStateMachineState.EMPTY.value
             slot_data = {
                 "index": i,
                 "tool": self.tool_offset + i,
-                "status": inv.get("status"),
+                "status": slot_status,
                 "color": inv.get("color"),
                 "material": inv.get("material"),
                 "temp": inv.get("temp"),
-                "rfid": inv.get("rfid", False),
+                # An empty slot has no RFID identity. Even if stale metadata lingers
+                # in the persisted inventory (unflushed empty-clear reloaded after a
+                # restart, or a reconnect re-query), never expose it here.
+                "rfid": False if is_empty else inv.get("rfid", False),
             }
-            for key in [
-                "sku",
-                "brand",
-                "icon_type",
-                "rgba",
-                "extruder_temp",
-                "hotbed_temp",
-                "diameter",
-                "total",
-                "current",
-            ]:
-                if key in inv:
-                    slot_data[key] = inv[key]
+            if not is_empty:
+                for key in [
+                    "sku",
+                    "brand",
+                    "icon_type",
+                    "rgba",
+                    "extruder_temp",
+                    "hotbed_temp",
+                    "diameter",
+                    "total",
+                    "current",
+                ]:
+                    if key in inv:
+                        slot_data[key] = inv[key]
             slots_out.append(slot_data)
 
         status["slots"] = slots_out

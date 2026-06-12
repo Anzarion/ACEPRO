@@ -343,11 +343,21 @@ class MoonrakerLaneSyncAdapter:
         sku = inv.get("sku")
         if isinstance(sku, int):
             return sku
-        if isinstance(sku, str) and sku.isdigit():
-            try:
-                return int(sku)
-            except Exception:
-                return None
+        if isinstance(sku, str):
+            # Whole SKU is the spool id (legacy/Spoolman-numeric case).
+            if sku.isdigit():
+                try:
+                    return int(sku)
+                except Exception:
+                    return None
+            # FilaMan SKU format VENDOR-MATERIAL-SPOOL_ID (e.g. "ESUN-PLA-1"):
+            # the trailing "-"-segment is the FilaMan/Spoolman spool id.
+            tail = sku.rsplit("-", 1)[-1].strip()
+            if tail.isdigit():
+                try:
+                    return int(tail)
+                except Exception:
+                    return None
         return None
 
     @staticmethod

@@ -574,3 +574,107 @@ class TestMoonrakerLaneSyncConfigDefaults:
 
         result = read_ace_config(mock_config)
         assert result["moonraker_lane_sync_enabled"] is True
+
+
+class TestRfidCallbackLatchFix:
+    """Latch/backoff fix: the callback is the source of truth for the rfid flag."""
+
+    def _instance(self):
+        from extras.ace.instance import AceInstance  # noqa: F401
+        instance = MagicMock()
+        instance.instance_num = 0
+        instance.SLOT_COUNT = 4
+        instance.ace_config = {"rfid_temp_mode": "average"}
+        instance.MATERIAL_TEMPS = {"PLA": 200}
+        instance.DEFAULT_TEMP = 200
+        instance.gcode = MagicMock()
+        instance.manager = MagicMock()
+        instance._rfid_query_attempts = {}
+        instance._pending_rfid_queries = {0}
+        instance._note_rfid_query_failure = (
+            lambda s: AceInstance._note_rfid_query_failure(instance, s)
+        )
+        instance.inventory = [
+            {"status": "ready", "color": [0, 0, 0], "material": "PLA", "temp": 200, "rfid": True},
+        ]
+        return instance
+
+    def _call(self, instance, response):
+        from extras.ace.instance import AceInstance
+        AceInstance._handle_rfid_info_response(instance, 0, response)
+
+    def test_success_sets_rfid_true_and_clears_attempts(self):
+        instance = self._instance()
+        instance._rfid_query_attempts[0] = 2
+        self._call(instance, {
+            "code": 0,
+            "result": {"rfid": 2, "sku": "ESUN-PLA-1", "type": "PLA",
+                       "extruder_temp": {"min": 200, "max": 220}},
+        })
+        assert instance.inventory[0]["rfid"] is True
+        assert 0 not in instance._rfid_query_attempts
+
+    def test_error_response_resets_rfid_and_counts_attempt(self):
+        instance = self._instance()
+        self._call(instance, {"code": -1, "msg": "RFID read failed"})
+        assert instance.inventory[0]["rfid"] is False
+        assert instance._rfid_query_attempts[0] == 1
+
+    def test_not_identified_resets_rfid_and_counts_attempt(self):
+        instance = self._instance()
+        self._call(instance, {"code": 0, "result": {"rfid": 1}})
+        assert instance.inventory[0]["rfid"] is False
+        assert instance._rfid_query_attempts[0] == 1
+
+    def test_attempts_accumulate_across_failures(self):
+        instance = self._instance()
+        self._call(instance, {"code": -1, "msg": "x"})
+        self._call(instance, {"code": -1, "msg": "x"})
+        assert instance._rfid_query_attempts[0] == 2
+
+    def test_drops_response_for_empty_slot(self):
+        """A late/reconnect answer must not re-populate a slot that is now empty."""
+        instance = self._instance()
+        instance.inventory[0]["status"] = "empty"
+        instance.inventory[0].pop("sku", None)
+        self._call(instance, {
+            "code": 0,
+            "result": {"rfid": 2, "sku": "ESUN-PLA-1", "type": "PLA",
+                       "extruder_temp": {"min": 200, "max": 220}},
+        })
+        assert "sku" not in instance.inventory[0]
+
+
+class TestGetStatusEmptySlotHidesRfid:
+    """get_status must never expose RFID metadata for an empty slot."""
+
+    def _instance(self):
+        from extras.ace.instance import AceInstance  # noqa: F401
+        instance = MagicMock()
+        instance.instance_num = 0
+        instance.protocol_name = "ace1_proto"
+        instance.rfid_inventory_sync_enabled = True
+        instance.SLOT_COUNT = 2
+        instance.tool_offset = 0
+        instance._info = {}
+        instance._last_rfid_state = {}
+        instance._get_current_feed_assist_index = lambda: -1
+        instance.inventory = [
+            {"status": "ready", "color": [255, 247, 0], "material": "PLA",
+             "temp": 205, "rfid": True, "sku": "ESUN-PLA-1", "total": 330, "current": 0},
+            {"status": "empty", "color": [0, 0, 0], "material": "", "temp": 0,
+             "rfid": True, "sku": "ESUN-PLA-1", "total": 330, "current": 0},
+        ]
+        return instance
+
+    def test_empty_slot_exposes_no_rfid_metadata(self):
+        from extras.ace.instance import AceInstance
+        status = AceInstance.get_status(self._instance())
+        ready, empty = status["slots"][0], status["slots"][1]
+        assert ready["sku"] == "ESUN-PLA-1"
+        assert ready["rfid"] is True
+        assert "sku" not in empty
+        assert "total" not in empty
+        assert "current" not in empty
+        assert empty["rfid"] is False
+
