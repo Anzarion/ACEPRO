@@ -2345,6 +2345,18 @@ class AceManager:
                     # Delegate to command handler
                     commands.cmd_ACE_CHANGE_TOOL(self, gcmd, tool_idx)
 
+                    # If spoolman/filaman integration is configured, set
+                    # the active spool after the physical tool change so
+                    # the high-water-mark tracker resets to the current
+                    # E-position (no blind-spot).
+                    spool_macro = self.printer.lookup_object(
+                        "gcode_macro _SET_SPOOL_BY_TOOL", None
+                    )
+                    if spool_macro is not None:
+                        self.gcode.run_script_from_command(
+                            f"_SET_SPOOL_BY_TOOL TOOL={tool_idx}"
+                        )
+
                 return tool_macro
 
             desc = f"Select tool {global_tool} " f"(ACE instance {instance_num})"
