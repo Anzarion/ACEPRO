@@ -2325,10 +2325,19 @@ class AceManager:
             global_tool = get_tool_offset(instance_num) + local_slot
             macro_name = f"T{global_tool}"
 
-            # Check if user has defined this macro (e.g., for Spoolman support)
-            existing_macro = self.printer.lookup_object(f"gcode_macro {macro_name}", None)
+            # Check if user has defined this macro (e.g., for Spoolman support).
+            # We check both the runtime object (already loaded) AND the raw
+            # config (defined but not yet loaded — happens when [ace] is
+            # parsed before [gcode_macro T<n>]).
+            existing_macro = self.printer.lookup_object(
+                f"gcode_macro {macro_name}", None
+            )
             if existing_macro is not None:
                 # User defined their own macro - skip auto-registration
+                continue
+            if self.config.has_section(f"gcode_macro {macro_name}"):
+                # Macro defined in config but not yet loaded — skip so
+                # Klipper's gcode_macro module can register it later.
                 continue
 
             def make_tool_macro(tool_idx):
