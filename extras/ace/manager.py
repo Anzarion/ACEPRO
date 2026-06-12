@@ -2362,6 +2362,21 @@ class AceManager:
             desc = f"Select tool {global_tool} " f"(ACE instance {instance_num})"
             self.gcode.register_command(macro_name, make_tool_macro(global_tool), desc=desc)
 
+    def clear_active_spool_if_configured(self):
+        """
+        Call CLEAR_ACTIVE_SPOOL after a successful unload so that
+        FilaMan / Spoolman stops tracking extrusion against the
+        previously active spool.
+
+        Mirror of the _SET_SPOOL_BY_TOOL hook in register_tool_macros:
+        only fires when spoolman_logic.cfg is included.
+        """
+        clear_macro = self.printer.lookup_object(
+            "gcode_macro CLEAR_ACTIVE_SPOOL", None
+        )
+        if clear_macro is not None:
+            self.gcode.run_script_from_command("CLEAR_ACTIVE_SPOOL")
+
     # ========== Status and Reporting ==========
 
     def get_status(self, eventtime=None):

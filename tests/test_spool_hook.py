@@ -246,3 +246,136 @@ class TestTMacroRegistrationPrecedence:
         """Instance 1 should register T4-T7 (4 macros)."""
         macros = self._register_and_get_macros(mock_manager, instance_num=1)
         assert set(macros.keys()) == {"T4", "T5", "T6", "T7"}
+
+
+class TestClearActiveSpoolHook:
+    """Tests for CLEAR_ACTIVE_SPOOL hook after unload operations."""
+
+    @pytest.fixture
+    def mock_manager(self):
+        """Create a mock AceManager with required attributes."""
+        manager = MagicMock()
+        manager.gcode = MagicMock()
+        manager.printer = MagicMock()
+        manager.state = MagicMock()
+
+        # Default: CLEAR_ACTIVE_SPOOL macro does not exist
+        manager.printer.lookup_object.return_value = None
+
+        return manager
+
+    def test_clear_called_when_macro_exists(self, mock_manager):
+        """CLEAR_ACTIVE_SPOOL should be called when the macro is defined."""
+        clear_macro_sentinel = MagicMock()
+
+        def lookup_side_effect(name, default=None):
+            if name == "gcode_macro CLEAR_ACTIVE_SPOOL":
+                return clear_macro_sentinel
+            return default
+
+        mock_manager.printer.lookup_object.side_effect = lookup_side_effect
+
+        from extras.ace.manager import AceManager
+        AceManager.clear_active_spool_if_configured(mock_manager)
+
+        mock_manager.gcode.run_script_from_command.assert_called_once_with(
+            "CLEAR_ACTIVE_SPOOL"
+        )
+
+    def test_clear_skipped_when_macro_missing(self, mock_manager):
+        """CLEAR_ACTIVE_SPOOL should not be called when macro is not defined."""
+        from extras.ace.manager import AceManager
+        AceManager.clear_active_spool_if_configured(mock_manager)
+
+        mock_manager.gcode.run_script_from_command.assert_not_called()
+
+    def test_smart_unload_calls_clear(self, mock_manager):
+        """cmd_ACE_SMART_UNLOAD should call clear_active_spool_if_configured on success."""
+        mock_manager.get_ace_global_enabled.return_value = True
+        mock_manager.state.get.return_value = 0  # current tool index
+        mock_manager.smart_unload.return_value = True
+
+        gcmd = MagicMock()
+        gcmd.get_int.return_value = -1  # no TOOL= param → use current
+
+        with patch("extras.ace.commands.ace_get_manager", return_value=mock_manager):
+            from extras.ace.commands import cmd_ACE_SMART_UNLOAD
+            cmd_ACE_SMART_UNLOAD(gcmd)
+
+        mock_manager.clear_active_spool_if_configured.assert_called_once()
+
+    def test_smart_unload_no_clear_on_failure(self, mock_manager):
+        """cmd_ACE_SMART_UNLOAD should NOT call clear on failure."""
+        mock_manager.get_ace_global_enabled.return_value = True
+        mock_manager.state.get.return_value = 0
+        mock_manager.smart_unload.return_value = False
+
+        gcmd = MagicMock()
+        gcmd.get_int.return_value = -1
+
+        with patch("extras.ace.commands.ace_get_manager", return_value=mock_manager):
+            from extras.ace.commands import cmd_ACE_SMART_UNLOAD
+            cmd_ACE_SMART_UNLOAD(gcmd)
+
+        mock_manager.clear_active_spool_if_configured.assert_not_called()
+
+    def test_full_unload_single_calls_clear(self, mock_manager):
+        """cmd_ACE_FULL_UNLOAD (single tool) should call clear on success."""
+        mock_manager.full_unload_slot.return_value = True
+        mock_manager.state.get.return_value = 0
+
+        gcmd = MagicMock()
+        gcmd.get.return_value = None  # not TOOL=ALL
+        gcmd.get_int.return_value = 0  # TOOL=0
+
+        with patch("extras.ace.commands.ace_get_manager", return_value=mock_manager):
+            from extras.ace.commands import cmd_ACE_FULL_UNLOAD
+            cmd_ACE_FULL_UNLOAD(gcmd)
+
+        mock_manager.clear_active_spool_if_configured.assert_called_once()
+
+    def test_full_unload_single_no_clear_on_failure(self, mock_manager):
+        """cmd_ACE_FULL_UNLOAD (single tool) should NOT call clear on failure."""
+        mock_manager.full_unload_slot.return_value = False
+        mock_manager.state.get.return_value = 0
+
+        gcmd = MagicMock()
+        gcmd.get.return_value = None
+        gcmd.get_int.return_value = 0
+
+        with patch("extras.ace.commands.ace_get_manager", return_value=mock_manager):
+            from extras.ace.commands import cmd_ACE_FULL_UNLOAD
+            cmd_ACE_FULL_UNLOAD(gcmd)
+
+        mock_manager.clear_active_spool_if_configured.assert_not_called()
+
+    def test_print_end_calls_clear(self, mock_manager):
+        """cmd_ACE_HANDLE_PRINT_END should call clear after successful unload."""
+        mock_manager.get_ace_global_enabled.return_value = True
+        mock_manager.state.get.return_value = 0  # current tool
+        mock_manager.smart_unload.return_value = True
+
+        gcmd = MagicMock()
+        gcmd.get_int.return_value = 1  # CUT_TIP=1
+
+        with patch("extras.ace.commands.ace_get_manager", return_value=mock_manager), \
+             patch("extras.ace.commands.for_each_instance"):
+            from extras.ace.commands import cmd_ACE_HANDLE_PRINT_END
+            cmd_ACE_HANDLE_PRINT_END(gcmd)
+
+        mock_manager.clear_active_spool_if_configured.assert_called_once()
+
+    def test_print_end_no_clear_on_failure(self, mock_manager):
+        """cmd_ACE_HANDLE_PRINT_END should NOT call clear if unload fails."""
+        mock_manager.get_ace_global_enabled.return_value = True
+        mock_manager.state.get.return_value = 0
+        mock_manager.smart_unload.return_value = False
+
+        gcmd = MagicMock()
+        gcmd.get_int.return_value = 1
+
+        with patch("extras.ace.commands.ace_get_manager", return_value=mock_manager):
+            from extras.ace.commands import cmd_ACE_HANDLE_PRINT_END
+            cmd_ACE_HANDLE_PRINT_END(gcmd)
+
+        mock_manager.clear_active_spool_if_configured.assert_not_called()

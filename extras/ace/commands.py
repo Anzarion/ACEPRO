@@ -1351,6 +1351,7 @@ def cmd_ACE_SMART_UNLOAD(gcmd):
         if success:
             gcmd.respond_info("ACE: Smart unload succeeded")
             manager.state.set_and_save("ace_current_index", -1)
+            manager.clear_active_spool_if_configured()
         else:
             gcmd.respond_info("ACE: Smart unload failed - path blocked")
     except Exception as e:
@@ -1398,6 +1399,7 @@ def cmd_ACE_HANDLE_PRINT_END(gcmd):
         if success:
             gcmd.respond_info(f"ACE: Tool T{tool_index} successfully unloaded")
             manager.state.set("ace_current_index", -1)
+            manager.clear_active_spool_if_configured()
             for_each_instance(lambda inst_num, mgr, instance: instance._disable_feed_assist(instance._feed_assist_index))
         else:
             gcmd.respond_info(f"ACE: WARNING - Tool T{tool_index} unload may have failed")
@@ -2009,6 +2011,7 @@ def cmd_ACE_FULL_UNLOAD(gcmd):
             # Clear current tool index if all successful
             if success_count == total_slots and total_slots > 0:
                 manager.state.set("ace_current_index", -1)
+                manager.clear_active_spool_if_configured()
                 gcmd.respond_info("\nACE: All slots fully unloaded - current tool cleared")
 
             manager.state.flush()
@@ -2026,6 +2029,7 @@ def cmd_ACE_FULL_UNLOAD(gcmd):
 
         if success:
             manager.state.set_and_save("ace_current_index", -1)
+            manager.clear_active_spool_if_configured()
             gcmd.respond_info(f"ACE: Tool {tool} fully unloaded")
         else:
             gcmd.respond_info(f"ACE: Tool {tool} full unload failed or incomplete")
