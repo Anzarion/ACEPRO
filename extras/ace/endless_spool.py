@@ -201,6 +201,17 @@ class EndlessSpool:
                     if from_inst_num >= 0 and from_slot >= 0:
                         ace_inst = self.manager.instances[from_inst_num]
                         if ace_inst:
+                            # Stop feed assist on the empty slot BEFORE the swap.
+                            # Without this, ACE2 stays "busy" from the old slot's
+                            # feed assist, and the new slot's feed command deadlocks
+                            # on wait_ready() (same-instance swap).
+                            fa_index = ace_inst._get_current_feed_assist_index()
+                            if fa_index == from_slot:
+                                self.gcode.respond_info(
+                                    f"ACE: Stopping feed assist on empty slot {from_slot}"
+                                )
+                                ace_inst._disable_feed_assist(from_slot)
+
                             ace_inst.inventory[from_slot]["status"] = "empty"
                             self.manager._sync_inventory_to_persistent(from_inst_num, flush=False)
                             self.gcode.respond_info(f"ACE: Marked T{from_tool} as empty")

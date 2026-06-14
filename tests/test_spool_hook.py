@@ -379,3 +379,233 @@ class TestClearActiveSpoolHook:
             cmd_ACE_HANDLE_PRINT_END(gcmd)
 
         mock_manager.clear_active_spool_if_configured.assert_not_called()
+
+
+class TestEndlessSpoolFeedAssistDisable:
+    """Tests for feed assist disable before endless spool swap.
+
+    When the toolhead sensor detects runout and endless spool triggers,
+    feed assist on the old (empty) slot must be stopped before the swap.
+    Otherwise ACE2 stays 'busy' and the new slot's feed command deadlocks
+    on wait_ready().
+    """
+
+    @pytest.fixture
+    def mock_endless_spool(self):
+        """Create a mock EndlessSpool with wired-up manager/instances."""
+        from extras.ace.endless_spool import EndlessSpool
+
+        manager = MagicMock()
+        manager.gcode = MagicMock()
+        manager.perform_tool_change.return_value = "OK"
+
+        # Create a mock ACE instance for instance 0 (slots 0-3)
+        ace_inst = MagicMock()
+        ace_inst.inventory = [
+            {"status": "empty", "material": "PLA", "color": [0, 0, 0]},
+            {"status": "ready", "material": "PLA", "color": [0, 0, 0]},
+            {"status": "ready", "material": "ABS", "color": [255, 0, 0]},
+            {"status": "ready", "material": "PLA", "color": [0, 0, 0]},
+        ]
+        manager.instances = {0: ace_inst}
+
+        printer = MagicMock()
+        gcode = manager.gcode
+
+        es = EndlessSpool(printer, gcode, manager)
+
+        return es, manager, ace_inst
+
+    def test_feed_assist_disabled_before_swap(self, mock_endless_spool):
+        """Feed assist on empty slot must be disabled before perform_tool_change."""
+        es, manager, ace_inst = mock_endless_spool
+
+        # Feed assist is active on slot 0 (the empty one)
+        ace_inst._get_current_feed_assist_index.return_value = 0
+
+        # Track call order
+        call_order = []
+        ace_inst._disable_feed_assist.side_effect = (
+            lambda slot: call_order.append(("disable_fa", slot))
+        )
+        manager.perform_tool_change.side_effect = (
+            lambda f, t, **kw: call_order.append(("tool_change", f, t)) or "OK"
+        )
+
+        with patch("extras.ace.endless_spool.get_instance_from_tool", return_value=0), \
+             patch("extras.ace.endless_spool.get_local_slot", return_value=0):
+            es.execute_swap(0, 1)
+
+        # Feed assist must be disabled BEFORE tool change
+        assert call_order[0] == ("disable_fa", 0), (
+            f"Expected disable_feed_assist first, got: {call_order}"
+        )
+        assert call_order[1] == ("tool_change", 0, 1), (
+            f"Expected perform_tool_change second, got: {call_order}"
+        )
+
+    def test_feed_assist_not_disabled_when_inactive(self, mock_endless_spool):
+        """If feed assist is not active, _disable_feed_assist should not be called."""
+        es, manager, ace_inst = mock_endless_spool
+
+        # Feed assist is NOT active (-1)
+        ace_inst._get_current_feed_assist_index.return_value = -1
+
+        with patch("extras.ace.endless_spool.get_instance_from_tool", return_value=0), \
+             patch("extras.ace.endless_spool.get_local_slot", return_value=0):
+            es.execute_swap(0, 1)
+
+        ace_inst._disable_feed_assist.assert_not_called()
+
+    def test_feed_assist_not_disabled_when_active_on_different_slot(self, mock_endless_spool):
+        """If feed assist is active on a different slot, don't touch it."""
+        es, manager, ace_inst = mock_endless_spool
+
+        # Feed assist is active on slot 2, but runout is on slot 0
+        ace_inst._get_current_feed_assist_index.return_value = 2
+
+        with patch("extras.ace.endless_spool.get_instance_from_tool", return_value=0), \
+             patch("extras.ace.endless_spool.get_local_slot", return_value=0):
+            es.execute_swap(0, 1)
+
+        ace_inst._disable_feed_assist.assert_not_called()
+
+
+class TestTangleVsEmptySpool:
+    """Tests for distinguishing tangle from empty spool in _check_tangle().
+
+    Physical scenario:
+    - ACE is ~2.4m from toolhead, connected via bowden tube
+    - Feed assist motor is in the ACE, pushing filament into the bowden
+    - Entry sensor per slot detects filament presence at the ACE
+
+    Three scenarios when cont_assist_time exceeds threshold:
+
+    1. TANGLE: Slot entry sensor has filament, but feed assist can't deliver
+       → filament is stuck → PAUSE + "Tangle Detected" prompt
+
+    2. EMPTY SPOOL: Slot entry sensor reports empty, filament left the gears
+       → spool is used up → disable feed assist, keep printing,
+         extruder pulls remaining ~2.4m from bowden alone,
+         toolhead sensor triggers normal runout later
+
+    3. FILAMENT BREAK: Slot entry sensor has filament (spool still loaded),
+       feed assist can't deliver (broken filament somewhere in path)
+       → same as tangle → PAUSE (user must intervene)
+    """
+
+    @pytest.fixture
+    def monitor(self):
+        """Create a RunoutMonitor with a mock Gen 1 ACE instance."""
+        from extras.ace.runout_monitor import RunoutMonitor
+
+        printer = MagicMock()
+        gcode = MagicMock()
+        reactor = MagicMock()
+        reactor.monotonic.return_value = 100.0
+        endless_spool = MagicMock()
+        manager = MagicMock()
+        manager.toolchange_in_progress = False
+
+        # Gen 1 ACE instance with feed assist active on slot 2
+        ace_inst = MagicMock()
+        ace_inst._feed_assist_index = 2
+        ace_inst.protocol_name = "ace1_json"
+        ace_inst.instance_num = 0
+
+        manager.instances = [ace_inst]
+
+        mon = RunoutMonitor(
+            printer, gcode, reactor, endless_spool, manager,
+            tangle_detection=True, tangle_pump_time=4.0,
+        )
+
+        return mon, ace_inst
+
+    def _trigger_tangle_threshold(self, mon, eventtime=100.0):
+        """Advance _check_tangle through the phase-start → threshold sequence.
+
+        Requires two calls: first sets phase_start, second crosses threshold.
+        """
+        # First call: cont_assist_time starts growing → phase_start set
+        mon._check_tangle(eventtime, current_tool=2)
+        # Second call: still above threshold → should trigger
+        mon._check_tangle(eventtime + 1.0, current_tool=2)
+
+    def test_tangle_pause_when_slot_has_filament(self, monitor):
+        """Slot has filament + cont_assist_time high → real tangle → pause."""
+        mon, ace_inst = monitor
+
+        # Slot 2 has filament (NOT empty)
+        ace_inst._is_slot_empty.return_value = False
+
+        # cont_assist_time above threshold (4.0s)
+        ace_inst._info = {"cont_assist_time": 5.0}
+
+        self._trigger_tangle_threshold(mon)
+
+        # Must call _handle_tangle_detected (which pauses)
+        assert mon.runout_handling_in_progress or \
+            mon.gcode.run_script_from_command.call_count > 0, \
+            "Tangle should trigger pause when slot has filament"
+        # Feed assist must NOT be disabled (filament is stuck, not empty)
+        ace_inst._disable_feed_assist.assert_not_called()
+
+    def test_feed_assist_disabled_when_slot_empty(self, monitor):
+        """Slot empty + cont_assist_time high → empty spool → disable feed assist, no pause."""
+        mon, ace_inst = monitor
+
+        # Slot 2 is empty (spool used up, filament left the gears)
+        ace_inst._is_slot_empty.return_value = True
+
+        ace_inst._info = {"cont_assist_time": 5.0}
+
+        self._trigger_tangle_threshold(mon)
+
+        # Feed assist must be disabled
+        ace_inst._disable_feed_assist.assert_called_once_with(2)
+        # Must NOT pause (extruder pulls remaining filament from bowden)
+        assert not mon.runout_handling_in_progress, \
+            "Empty spool should not trigger pause — toolhead sensor handles runout later"
+
+    def test_filament_break_treated_as_tangle(self, monitor):
+        """Filament break: slot has filament but can't deliver → same as tangle."""
+        mon, ace_inst = monitor
+
+        # Slot 2 has filament (spool still loaded, but filament broke)
+        ace_inst._is_slot_empty.return_value = False
+
+        ace_inst._info = {"cont_assist_time": 5.0}
+
+        self._trigger_tangle_threshold(mon)
+
+        # Must trigger tangle (pause), NOT disable feed assist
+        ace_inst._disable_feed_assist.assert_not_called()
+
+    def test_phase_resets_after_empty_spool_disable(self, monitor):
+        """After disabling feed assist for empty spool, phase tracking must reset."""
+        mon, ace_inst = monitor
+
+        ace_inst._is_slot_empty.return_value = True
+        ace_inst._info = {"cont_assist_time": 5.0}
+
+        self._trigger_tangle_threshold(mon)
+
+        # Phase tracking must be reset so it doesn't re-trigger
+        assert mon._pt_phase_start_eventtime is None
+        assert mon._pt_last_value_s == 0.0
+
+    def test_no_action_below_threshold(self, monitor):
+        """cont_assist_time below threshold → no action regardless of slot state."""
+        mon, ace_inst = monitor
+
+        ace_inst._is_slot_empty.return_value = True
+        ace_inst._info = {"cont_assist_time": 2.0}  # below 4.0 threshold
+
+        # First tick: phase start
+        mon._check_tangle(100.0, current_tool=2)
+        # Second tick: still below threshold
+        ace_inst._info = {"cont_assist_time": 3.0}
+        mon._check_tangle(101.0, current_tool=2)
+
+        ace_inst._disable_feed_assist.assert_not_called()

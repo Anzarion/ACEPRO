@@ -448,15 +448,41 @@ class RunoutMonitor:
             self._pt_phase_start_eventtime = eventtime
             return
 
-        # Threshold crossed → tangle
+        # Threshold crossed — distinguish empty spool from real tangle.
+        #
+        # Physical model (ACE Gen 1, bowden setup):
+        #   1. Spool empties → entry sensor reports slot "empty"
+        #   2. Feed assist pushes the last cm out of the gears
+        #   3. cont_assist_time climbs (pumping without delivering)
+        #   4. Once threshold is reached, filament has left the gears
+        #
+        # If the slot is empty: not a tangle — the spool is used up.
+        #   → Disable feed assist (no filament to push).
+        #   → Keep printing: the extruder pulls the remaining filament
+        #     from the bowden tube alone until the toolhead sensor
+        #     triggers normal runout detection.
+        #
+        # If the slot still has filament: real tangle or filament break.
+        #   → Pause and show tangle prompt (user must intervene).
         if current >= self.tangle_pump_time:
-            logging.warning(
-                "ACE: TANGLE DETECTED on T%d — cont_assist_time=%.1fs >= %.1fs",
-                current_tool, current, self.tangle_pump_time,
-            )
             self._pt_phase_start_eventtime = None
             self._pt_last_value_s = 0.0
-            self._handle_tangle_detected(current_tool)
+
+            fa_slot = getattr(inst, "_feed_assist_index", -1)
+            if fa_slot >= 0 and inst._is_slot_empty(fa_slot):
+                logging.info(
+                    "ACE: Empty spool detected on T%d — "
+                    "cont_assist_time=%.1fs >= %.1fs, slot %d empty. "
+                    "Disabling feed assist, extruder pulls remaining bowden filament.",
+                    current_tool, current, self.tangle_pump_time, fa_slot,
+                )
+                inst._disable_feed_assist(fa_slot)
+            else:
+                logging.warning(
+                    "ACE: TANGLE DETECTED on T%d — cont_assist_time=%.1fs >= %.1fs",
+                    current_tool, current, self.tangle_pump_time,
+                )
+                self._handle_tangle_detected(current_tool)
 
     def _get_active_gen1_instance(self):
         """Return the Gen 1 instance currently pumping (feed_assist active), or None.
