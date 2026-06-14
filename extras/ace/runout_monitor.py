@@ -470,11 +470,9 @@ class RunoutMonitor:
 
             fa_slot = getattr(inst, "_feed_assist_index", -1)
             if fa_slot >= 0 and inst._is_slot_empty(fa_slot):
-                logging.info(
-                    "ACE: Empty spool detected on T%d — "
-                    "cont_assist_time=%.1fs >= %.1fs, slot %d empty. "
-                    "Disabling feed assist, extruder pulls remaining bowden filament.",
-                    current_tool, current, self.tangle_pump_time, fa_slot,
+                self.gcode.respond_info(
+                    f"ACE: T{current_tool} spool empty — "
+                    f"disabling feed assist, pulling remaining filament"
                 )
                 inst._disable_feed_assist(fa_slot)
             else:
