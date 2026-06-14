@@ -63,6 +63,7 @@ class RunoutMonitor:
 
         self.runout_detection_active = False
         self.runout_handling_in_progress = False
+        self._empty_spool_detected = False  # Set by _check_tangle when slot empties
         self._monitoring_timer = None
 
         # Tangle detection (pump_time)
@@ -475,6 +476,7 @@ class RunoutMonitor:
                     f"disabling feed assist, pulling remaining filament"
                 )
                 inst._disable_feed_assist(fa_slot)
+                self._empty_spool_detected = True
             else:
                 logging.warning(
                     "ACE: TANGLE DETECTED on T%d — cont_assist_time=%.1fs >= %.1fs",
@@ -611,7 +613,13 @@ class RunoutMonitor:
         Args:
             tool_index: Tool index where runout was detected
         """
-        self.gcode.respond_info(f"ACE: Runout detected on T{tool_index}")
+        if self._empty_spool_detected:
+            self.gcode.respond_info(
+                f"ACE: T{tool_index} filament cleared — starting spool swap"
+            )
+        else:
+            self.gcode.respond_info(f"ACE: Runout detected on T{tool_index}")
+        self._empty_spool_detected = False
         self.runout_handling_in_progress = True
         self.prev_toolhead_sensor_state = None
         self._runout_false_count = 0
