@@ -733,3 +733,109 @@ class TestFlushForwardMethod:
             AceManager.flush_forward_until_clear(manager, tool_index=3)
 
         manager._turn_off_heater_if_idle.assert_called_once()
+
+
+class TestEmptySlotLoadGuard:
+    """ensure_tool_slot_loaded must abort a load before any filament moves.
+
+    ACE2 firmware ACKs a FEED on an empty slot and spins the motor until the
+    toolhead sensor times out minutes later; ACE1 fails fast. Either way the
+    previously loaded tool must be left untouched.
+    """
+
+    def _manager_with_slot(self, live_empty, inv_status):
+        from extras.ace.manager import AceManager
+
+        manager = MagicMock(spec=AceManager)
+        instance = MagicMock()
+        instance.instance_num = 0
+        instance._is_slot_empty.return_value = live_empty
+        instance.inventory = [{"status": inv_status} for _ in range(4)]
+        return manager, instance
+
+    def _call(self, manager, instance, slot, tool_index):
+        from extras.ace.manager import AceManager
+        with patch(
+            "extras.ace.manager.get_ace_instance_and_slot_for_tool",
+            return_value=(instance, slot)
+        ):
+            return AceManager.ensure_tool_slot_loaded(manager, tool_index)
+
+    def test_raises_when_device_reports_empty(self):
+        manager, instance = self._manager_with_slot(True, "ready")
+        with pytest.raises(ValueError, match="device-reported"):
+            self._call(manager, instance, 0, 0)
+
+    def test_raises_when_inventory_reports_empty(self):
+        manager, instance = self._manager_with_slot(False, "empty")
+        with pytest.raises(ValueError, match="inventory-reported"):
+            self._call(manager, instance, 2, 2)
+
+    def test_passes_when_slot_ready(self):
+        manager, instance = self._manager_with_slot(False, "ready")
+        assert self._call(manager, instance, 1, 1) is None
+
+    def test_noop_for_unload(self):
+        """tool_index -1 means unload - the guard must not interfere."""
+        manager, instance = self._manager_with_slot(True, "empty")
+        assert self._call(manager, instance, 0, -1) is None
+        instance._is_slot_empty.assert_not_called()
+
+    def test_unknown_slot_state_does_not_block_on_its_own(self):
+        """A non-bool from _is_slot_empty means 'unknown', not 'empty'."""
+        manager, instance = self._manager_with_slot(None, "ready")
+        assert self._call(manager, instance, 0, 0) is None
+
+
+class TestFlushFallbackOnBlockedPath:
+    """A blocked path plus an empty slot can only mean orphaned filament.
+
+    The spool ran out at the ACE, so its feed gears have nothing to grip and
+    no retract can clear the bowden - but the extruder still holds it. This
+    applies to a mid-print toolchange just as much as to print end.
+    """
+
+    def _manager(self, slot_empty, flush_result=True):
+        from extras.ace.manager import AceManager
+
+        manager = MagicMock(spec=AceManager)
+        manager.gcode = MagicMock()
+        manager.flush_forward_until_clear = MagicMock(return_value=flush_result)
+        instance = MagicMock()
+        instance._is_slot_empty.return_value = slot_empty
+        return manager, instance
+
+    def test_flushes_when_slot_empty(self):
+        from extras.ace.manager import AceManager
+        manager, instance = self._manager(slot_empty=True)
+
+        result = AceManager._flush_if_spool_ran_out(manager, 3, instance, 3)
+
+        assert result is True
+        manager.flush_forward_until_clear.assert_called_once_with(3)
+
+    def test_does_not_flush_when_slot_still_has_filament(self):
+        """A blocked path with filament in the slot is a genuine jam; the
+        caller must keep raising rather than purging good filament."""
+        from extras.ace.manager import AceManager
+        manager, instance = self._manager(slot_empty=False)
+
+        result = AceManager._flush_if_spool_ran_out(manager, 3, instance, 3)
+
+        assert result is False
+        manager.flush_forward_until_clear.assert_not_called()
+
+    def test_propagates_flush_failure(self):
+        from extras.ace.manager import AceManager
+        manager, instance = self._manager(slot_empty=True, flush_result=False)
+
+        assert AceManager._flush_if_spool_ran_out(manager, 3, instance, 3) is False
+
+    def test_slot_query_error_is_treated_as_not_empty(self):
+        """An unreadable slot state must not trigger a 2 m purge."""
+        from extras.ace.manager import AceManager
+        manager, instance = self._manager(slot_empty=True)
+        instance._is_slot_empty.side_effect = Exception("comms error")
+
+        assert AceManager._flush_if_spool_ran_out(manager, 3, instance, 3) is False
+        manager.flush_forward_until_clear.assert_not_called()

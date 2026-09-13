@@ -1472,6 +1472,13 @@ def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
     printer = get_printer()
 
     try:
+        # Empty-slot guard BEFORE homing/heating/feeding: ACE2 firmware ACKs
+        # a feed on an empty slot and spins for minutes until the toolhead
+        # sensor timeout. Raising routes into the failure handling below
+        # (pause + Retry prompt mid-print, macro abort at startup, plain
+        # message when idle).
+        manager.ensure_tool_slot_loaded(tool_index)
+
         toolhead = printer.lookup_object('toolhead')
         reactor = printer.get_reactor()
         kin_status = toolhead.get_kinematics().get_status(reactor.monotonic())

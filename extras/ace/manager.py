@@ -1006,6 +1006,8 @@ class AceManager:
                         self._turn_off_heater_if_idle()
                     return True
                 else:
+                    if self._flush_if_spool_ran_out(tool_index, instance, local_slot):
+                        return True
                     raise Exception(f"Path still blocked after unload of T{tool_index}")
 
             # Sensor triggered - coordinated retraction
@@ -1052,6 +1054,8 @@ class AceManager:
                         self._turn_off_heater_if_idle()
                     return True
                 else:
+                    if self._flush_if_spool_ran_out(tool_index, instance, local_slot):
+                        return True
                     raise Exception(f"Unload failed for T{tool_index}")
 
             except Exception as e:
@@ -1129,6 +1133,44 @@ class AceManager:
             f"rdm_triggered={rdm_triggered}"
         )
         raise Exception("Unexpected state in smart_unload")
+
+    def _flush_if_spool_ran_out(self, tool_index, instance, local_slot):
+        """Clear an un-retractable bowden by flushing it forward.
+
+        When a spool runs out AT the ACE, the filament tail leaves the feed
+        gears while the rest still spans the bowden.  The ACE then has nothing
+        to grip - ``_retract()`` skips outright on an empty slot and reports
+        success, and a fixed-length unwind just spins the gears - so no amount
+        of retracting will free the path.  The extruder still holds the
+        filament, so the only way out is forward, through the nozzle.
+
+        This is the direct hardware condition and needs no monitor history:
+        empty slot plus a blocked path can only mean orphaned filament.
+        It therefore also covers a mid-print toolchange, not just print end.
+
+        Args:
+            tool_index: Tool whose unload left the path blocked.
+            instance: Owning AceInstance.
+            local_slot: Slot index within that instance.
+
+        Returns:
+            bool: True if the slot was empty and the flush cleared the path.
+                  False if the slot still holds filament - that is a real jam
+                  and the caller must keep failing.
+        """
+        try:
+            slot_empty = instance._is_slot_empty(local_slot) is True
+        except Exception:
+            slot_empty = False
+        if not slot_empty:
+            return False
+
+        self.gcode.respond_info(
+            f"ACE: T{tool_index} spool ran out at the ACE - the bowden cannot "
+            f"be retracted (nothing left for the gears to grip). Flushing the "
+            f"orphaned filament forward through the nozzle."
+        )
+        return self.flush_forward_until_clear(tool_index)
 
     def flush_forward_until_clear(self, tool_index):
         """Purge orphaned filament forward until the toolhead sensor clears.
@@ -2071,6 +2113,56 @@ class AceManager:
         except Exception as e:
             self.gcode.respond_info(f"ACE: Error closing dialog: {e}")
 
+    def ensure_tool_slot_loaded(self, tool_index):
+        """Raise if the target tool's ACE slot reports empty.
+
+        Guard for every load path: ACE2 firmware ACKs a FEED on an empty
+        slot (result_code=0) and spins the feed motor until the toolhead
+        sensor timeout minutes later; ACE1 fails fast.
+        Checks the live device-reported slot state first, then the
+        inventory status.  No-op for unload (-1) or unresolvable tools —
+        those paths have their own handling.
+
+        Args:
+            tool_index: Global tool index about to be loaded.
+
+        Raises:
+            ValueError: If the slot reports empty.
+        """
+        if tool_index is None or tool_index < 0:
+            return
+        try:
+            instance, slot = get_ace_instance_and_slot_for_tool(tool_index)
+        except Exception:
+            return
+        if instance is None or slot is None or slot < 0:
+            return
+
+        # Strict-bool contract: _is_slot_empty returns True/False; anything
+        # else (error, unavailable) counts as "unknown" and does not block
+        # on its own - the inventory check below still applies.
+        live_empty = False
+        try:
+            live_empty = instance._is_slot_empty(slot) is True
+        except Exception:
+            pass
+        inv_empty = False
+        try:
+            inv_empty = (
+                instance.inventory[slot].get("status", "empty") == "empty"
+            )
+        except Exception:
+            pass
+
+        if live_empty or inv_empty:
+            source = "device" if live_empty else "inventory"
+            raise ValueError(
+                f"ACE[{instance.instance_num}] slot {slot} (T{tool_index}) is "
+                f"EMPTY ({source}-reported) - insert a spool and retry. "
+                f"Aborted before any filament movement - the previously "
+                f"loaded tool (if any) is untouched."
+            )
+
     @toolchange_in_progress_guard
     def perform_tool_change(self, current_tool, target_tool, is_endless_spool=False):
         """
@@ -2083,6 +2175,12 @@ class AceManager:
         """
         status = None
         gcode_move = self.printer.lookup_object("gcode_move")
+
+        # Empty-slot guard (defense in depth - the command layer checks before
+        # homing already; this covers endless spool and direct callers).
+        # Raising here routes into the callers' existing failure handling:
+        # pause+prompt mid-print, abort at startup.
+        self.ensure_tool_slot_loaded(target_tool)
 
         toolhead_sensor = self.get_switch_state(SENSOR_TOOLHEAD)
         rdm_sensor = self.get_switch_state(SENSOR_RDM) if self.has_rdm_sensor() else False

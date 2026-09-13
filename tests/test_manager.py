@@ -1687,6 +1687,21 @@ class TestGetStatus(unittest.TestCase):
 class TestPerformToolChange(unittest.TestCase):
     """Test perform_tool_change functionality with comprehensive branch coverage."""
 
+    def _ready_inventory(self, manager):
+        """Restore ready slots on all instances.
+
+        AceManager.__init__ reloads the persisted inventory, which is empty
+        in these tests, over the fixture's slots. Without this the
+        empty-slot load guard (ensure_tool_slot_loaded) aborts every
+        toolchange before the behaviour under test is reached.
+        """
+        for instance in manager.instances:
+            instance.inventory = [
+                {'status': 'ready', 'temp': 210, 'material': 'PLA'}
+                for _ in range(4)
+            ]
+        return manager
+
     def setUp(self):
         """Set up test fixtures with extensive mocking."""
         ACE_INSTANCES.clear()
@@ -2262,7 +2277,7 @@ class TestPerformToolChange(unittest.TestCase):
     @patch('ace.manager.EndlessSpool')
     def test_spool_not_ready_raises_error(self, mock_endless_spool, mock_ace_instance):
         """Test error when target spool not ready."""
-        manager = AceManager(self.mock_config)
+        manager = self._ready_inventory(AceManager(self.mock_config))
         self.variables['ace_filament_pos'] = FILAMENT_STATE_SPLITTER
         manager._sensor_override = {SENSOR_TOOLHEAD: False, SENSOR_RDM: False}
         manager.check_and_wait_for_spool_ready = Mock(return_value=False)
@@ -2340,7 +2355,7 @@ class TestPerformToolChange(unittest.TestCase):
     @patch('ace.manager.EndlessSpool')
     def test_invalid_state_nozzle_filled_rdm_empty_raises(self, mock_endless_spool, mock_ace_instance):
         """Test invalid state: filament at nozzle but RDM empty (broken filament path)."""
-        manager = AceManager(self.mock_config)
+        manager = self._ready_inventory(AceManager(self.mock_config))
         self.variables['ace_filament_pos'] = FILAMENT_STATE_NOZZLE
         # Toolhead has filament, but RDM is empty - indicates broken filament!
         manager._sensor_override = {SENSOR_TOOLHEAD: True, SENSOR_RDM: False}
@@ -2433,7 +2448,7 @@ class TestPerformToolChange(unittest.TestCase):
     @patch('ace.manager.EndlessSpool')
     def test_unload_failure_raises_exception(self, mock_endless_spool, mock_ace_instance):
         """Test exception raised when unload fails."""
-        manager = AceManager(self.mock_config)
+        manager = self._ready_inventory(AceManager(self.mock_config))
         self.variables['ace_filament_pos'] = FILAMENT_STATE_NOZZLE
         # Sensor confirms filament is present so the unload path is taken.
         manager._sensor_override = {SENSOR_TOOLHEAD: True, SENSOR_RDM: False}
@@ -2490,7 +2505,7 @@ class TestPerformToolChange(unittest.TestCase):
     @patch('ace.manager.EndlessSpool')
     def test_plausibility_mismatch_toolhead_sensor_unload_fails_raises(self, mock_endless_spool, mock_ace_instance):
         """Test plausibility check failure when smart_unload fails."""
-        manager = AceManager(self.mock_config)
+        manager = self._ready_inventory(AceManager(self.mock_config))
         self.variables['ace_filament_pos'] = FILAMENT_STATE_BOWDEN
         # Sensors show filament but state says bowden - plausibility mismatch
         manager._sensor_override = {SENSOR_TOOLHEAD: True, SENSOR_RDM: False}
@@ -2505,7 +2520,7 @@ class TestPerformToolChange(unittest.TestCase):
     @patch('ace.manager.EndlessSpool')
     def test_plausibility_mismatch_rdm_sensor_unload_fails_raises(self, mock_endless_spool, mock_ace_instance):
         """Test plausibility check failure when smart_unload fails."""
-        manager = AceManager(self.mock_config)
+        manager = self._ready_inventory(AceManager(self.mock_config))
         self.variables['ace_filament_pos'] = FILAMENT_STATE_BOWDEN
         # Sensors show filament but state says bowden - plausibility mismatch
         manager._sensor_override = {SENSOR_TOOLHEAD: False, SENSOR_RDM: True}
@@ -2521,7 +2536,7 @@ class TestPerformToolChange(unittest.TestCase):
     @patch('ace.manager.EndlessSpool')
     def test_plausibility_mismatch_rdm_sensor_unload_success(self, mock_endless_spool, mock_ace_instance):
         """Test plausibility check when smart_unload succeeds."""
-        manager = AceManager(self.mock_config)
+        manager = self._ready_inventory(AceManager(self.mock_config))
         self.variables['ace_filament_pos'] = FILAMENT_STATE_BOWDEN
         # Sensors show filament but state says bowden - plausibility mismatch
         manager._sensor_override = {SENSOR_TOOLHEAD: False, SENSOR_RDM: True}
