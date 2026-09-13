@@ -1156,58 +1156,75 @@ class AceManager:
         # --- Position over bucket ---
         self.gcode.run_script_from_command("TO_THROW_POSITION")
 
-        # --- Ensure nozzle is hot enough for extrusion ---
+        # --- Hold a nozzle target for the WHOLE flush ---
+        # Checking the temperature once is not enough: the flush runs for
+        # minutes (a 2.1 m bowden at 3 mm/s takes ~12), and PRINT_END issues
+        # M104 S0 before this point.  A nozzle that is hot enough *now* would
+        # then coast below min_extrude_temp mid-flush and the extruder move
+        # would abort with filament still in the melt zone.  So always set a
+        # target, so Klipper holds it for the duration.
         extruder = self.printer.lookup_object("extruder", None)
         if extruder is not None:
             heater = extruder.get_heater()
-            cur_temp = heater.get_temp(self.reactor.monotonic())[0]
-            min_temp = heater.min_extrude_temp
+            cur_temp, cur_target = heater.get_temp(self.reactor.monotonic())
 
-            if cur_temp < min_temp:
-                # Prefer inventory temp for the depleted tool
-                heat_temp = 0
-                target_ace, target_slot = get_ace_instance_and_slot_for_tool(
-                    tool_index
-                )
-                if target_ace is not None:
-                    heat_temp = target_ace.inventory[target_slot].get("temp", 0) or 0
-                if heat_temp <= 0:
-                    heat_temp = max(min_temp, 205)
+            # Prefer inventory temp for the depleted tool
+            heat_temp = 0
+            target_ace, target_slot = get_ace_instance_and_slot_for_tool(
+                tool_index
+            )
+            if target_ace is not None:
+                heat_temp = target_ace.inventory[target_slot].get("temp", 0) or 0
+            if heat_temp <= 0:
+                heat_temp = max(heater.min_extrude_temp, 205)
+            # Never cool down a still-active print target just to reach ours
+            heat_temp = max(heat_temp, cur_target)
 
-                self.gcode.respond_info(
-                    f"ACE: Heating nozzle to {heat_temp:.0f}°C for flush "
-                    f"(current: {cur_temp:.0f}°C)"
-                )
-                self.gcode.run_script_from_command(f"M109 S{heat_temp:.0f}")
+            self.gcode.respond_info(
+                f"ACE: Holding nozzle at {heat_temp:.0f}°C for the flush "
+                f"(current {cur_temp:.0f}°C, previous target {cur_target:.0f}°C)"
+            )
+            self.gcode.run_script_from_command(f"M109 S{heat_temp:.0f}")
 
         # --- Flush in chunks, checking sensor after each ---
         total_flushed = 0.0
+        cleared = False
 
         try:
             while total_flushed < MAX_FLUSH_MM:
                 if not self.get_switch_state(SENSOR_TOOLHEAD):
-                    self.gcode.respond_info(
-                        f"ACE: Toolhead sensor clear after "
-                        f"{total_flushed:.0f}mm — filament purged"
-                    )
+                    cleared = True
                     break
 
                 chunk = min(FLUSH_CHUNK_MM, MAX_FLUSH_MM - total_flushed)
                 self._extruder_move(chunk, FLUSH_SPEED_MMS, wait_for_move_end=True)
                 total_flushed += chunk
             else:
-                if self.get_switch_state(SENSOR_TOOLHEAD):
-                    self.gcode.respond_info(
-                        f"ACE: WARNING — flushed {total_flushed:.0f}mm but "
-                        f"toolhead sensor still triggered"
-                    )
-                    return False
-
+                # Safety cap reached without a break - the sensor may still
+                # have cleared on the very last chunk.
+                cleared = not self.get_switch_state(SENSOR_TOOLHEAD)
+        except Exception:
+            # Never leave a hot nozzle parked over the bucket on an aborted
+            # flush (e.g. cold-extrude abort, emergency stop).
+            self._turn_off_heater_if_idle()
+            raise
         finally:
             self.gcode.run_script_from_command("G92 E0")
             self.gcode.run_script_from_command("G90")
 
-        # --- Cleanup ---
+        if not cleared:
+            self.gcode.respond_info(
+                f"ACE: WARNING — flushed {total_flushed:.0f}mm but the toolhead "
+                f"sensor is still triggered; the filament path is NOT clear"
+            )
+            self._turn_off_heater_if_idle()
+            return False
+
+        self.gcode.respond_info(
+            f"ACE: Toolhead sensor clear after {total_flushed:.0f}mm"
+        )
+
+        # --- Cleanup (success path only: wipe while still hot, then cool) ---
         self.gcode.run_script_from_command("NOZZLE_CLEAN")
         self.gcode.run_script_from_command("TO_THROW_POSITION")
         self._turn_off_heater_if_idle()

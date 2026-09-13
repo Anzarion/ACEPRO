@@ -637,3 +637,99 @@ class TestFlushForwardMethod:
         gcode_calls = [str(c) for c in manager.gcode.run_script_from_command.call_args_list]
         assert any("G92 E0" in c for c in gcode_calls)
         assert any("G90" in c for c in gcode_calls)
+
+    def test_flush_holds_target_when_hot_but_heater_off(self, mock_manager_flush):
+        """Regression: nozzle still hot but target already 0 (PRINT_END did
+        M104 S0). Checking the temperature once would skip heating and the
+        nozzle would coast below min_extrude_temp mid-flush, aborting the
+        extruder move with filament in the melt zone. A target must be set."""
+        manager = mock_manager_flush
+
+        heater = manager.printer.lookup_object.return_value.get_heater.return_value
+        heater.get_temp.return_value = (200.0, 0.0)  # hot now, but cooling
+        heater.min_extrude_temp = 170.0
+
+        manager.get_switch_state.return_value = False  # clears immediately
+
+        from extras.ace.manager import AceManager
+        ace_inst = MagicMock()
+        ace_inst.inventory = [{}, {}, {}, {"temp": 215}]
+        with patch(
+            "extras.ace.manager.get_ace_instance_and_slot_for_tool",
+            return_value=(ace_inst, 3)
+        ):
+            result = AceManager.flush_forward_until_clear(manager, tool_index=3)
+
+        assert result is True
+        m109_calls = [
+            c for c in manager.gcode.run_script_from_command.call_args_list
+            if "M109" in str(c)
+        ]
+        assert len(m109_calls) == 1, "flush must hold a target for its duration"
+        assert "215" in str(m109_calls[0])
+
+    def test_flush_does_not_lower_an_active_print_target(self, mock_manager_flush):
+        """An still-active, higher print target must not be cooled down to the
+        inventory temperature just because the flush prefers that value."""
+        manager = mock_manager_flush
+
+        heater = manager.printer.lookup_object.return_value.get_heater.return_value
+        heater.get_temp.return_value = (245.0, 245.0)  # ABS print still hot
+        heater.min_extrude_temp = 170.0
+
+        manager.get_switch_state.return_value = False
+
+        from extras.ace.manager import AceManager
+        ace_inst = MagicMock()
+        ace_inst.inventory = [{}, {}, {}, {"temp": 205}]
+        with patch(
+            "extras.ace.manager.get_ace_instance_and_slot_for_tool",
+            return_value=(ace_inst, 3)
+        ):
+            AceManager.flush_forward_until_clear(manager, tool_index=3)
+
+        m109_calls = [
+            str(c) for c in manager.gcode.run_script_from_command.call_args_list
+            if "M109" in str(c)
+        ]
+        assert len(m109_calls) == 1
+        assert "245" in m109_calls[0], "must not cool an active print target"
+
+    def test_flush_turns_off_heater_on_failure(self, mock_manager_flush):
+        """Regression: a failed flush used to return early, skipping heater
+        shutdown and leaving a hot nozzle parked over the bucket after the
+        print had already finished."""
+        manager = mock_manager_flush
+        manager.get_switch_state.return_value = True  # never clears
+
+        from extras.ace.manager import AceManager
+        result = AceManager.flush_forward_until_clear(manager, tool_index=3)
+
+        assert result is False
+        manager._turn_off_heater_if_idle.assert_called_once()
+
+    def test_flush_no_nozzle_clean_on_failure(self, mock_manager_flush):
+        """Wiping makes no sense while filament is still being pushed out;
+        only the success path should run NOZZLE_CLEAN."""
+        manager = mock_manager_flush
+        manager.get_switch_state.return_value = True  # never clears
+
+        from extras.ace.manager import AceManager
+        AceManager.flush_forward_until_clear(manager, tool_index=3)
+
+        gcode_calls = [str(c) for c in manager.gcode.run_script_from_command.call_args_list]
+        assert not any("NOZZLE_CLEAN" in c for c in gcode_calls)
+        manager.state.set.assert_not_called()
+
+    def test_flush_turns_off_heater_when_move_raises(self, mock_manager_flush):
+        """An aborted flush (e.g. cold-extrude abort) must not leave the
+        heater running either."""
+        manager = mock_manager_flush
+        manager.get_switch_state.return_value = True
+        manager._extruder_move.side_effect = Exception("Extrude below minimum temp")
+
+        from extras.ace.manager import AceManager
+        with pytest.raises(Exception, match="minimum temp"):
+            AceManager.flush_forward_until_clear(manager, tool_index=3)
+
+        manager._turn_off_heater_if_idle.assert_called_once()
