@@ -1130,6 +1130,94 @@ class AceManager:
         )
         raise Exception("Unexpected state in smart_unload")
 
+    def flush_forward_until_clear(self, tool_index):
+        """Purge orphaned filament forward until the toolhead sensor clears.
+
+        Called at print end when the spool emptied during printing but the
+        print finished before the toolhead sensor triggered runout.  The ACE
+        has nothing to grip, so normal retraction cannot work.  Instead we
+        push the remaining filament out through the nozzle over the bucket.
+
+        Args:
+            tool_index: Tool whose spool was depleted.
+
+        Returns:
+            bool: True if filament was successfully purged.
+        """
+        FLUSH_CHUNK_MM = 50.0
+        FLUSH_SPEED_MMS = 3.0
+        MAX_FLUSH_MM = 3000.0  # safety cap (~2.4m bowden + margin)
+
+        self.gcode.respond_info(
+            f"ACE: Flushing orphaned filament forward for T{tool_index} "
+            f"(spool depleted, ACE cannot retract)"
+        )
+
+        # --- Position over bucket ---
+        self.gcode.run_script_from_command("TO_THROW_POSITION")
+
+        # --- Ensure nozzle is hot enough for extrusion ---
+        extruder = self.printer.lookup_object("extruder", None)
+        if extruder is not None:
+            heater = extruder.get_heater()
+            cur_temp = heater.get_temp(self.reactor.monotonic())[0]
+            min_temp = heater.min_extrude_temp
+
+            if cur_temp < min_temp:
+                # Prefer inventory temp for the depleted tool
+                heat_temp = 0
+                target_ace, target_slot = get_ace_instance_and_slot_for_tool(
+                    tool_index
+                )
+                if target_ace is not None:
+                    heat_temp = target_ace.inventory[target_slot].get("temp", 0) or 0
+                if heat_temp <= 0:
+                    heat_temp = max(min_temp, 205)
+
+                self.gcode.respond_info(
+                    f"ACE: Heating nozzle to {heat_temp:.0f}°C for flush "
+                    f"(current: {cur_temp:.0f}°C)"
+                )
+                self.gcode.run_script_from_command(f"M109 S{heat_temp:.0f}")
+
+        # --- Flush in chunks, checking sensor after each ---
+        total_flushed = 0.0
+
+        try:
+            while total_flushed < MAX_FLUSH_MM:
+                if not self.get_switch_state(SENSOR_TOOLHEAD):
+                    self.gcode.respond_info(
+                        f"ACE: Toolhead sensor clear after "
+                        f"{total_flushed:.0f}mm — filament purged"
+                    )
+                    break
+
+                chunk = min(FLUSH_CHUNK_MM, MAX_FLUSH_MM - total_flushed)
+                self._extruder_move(chunk, FLUSH_SPEED_MMS, wait_for_move_end=True)
+                total_flushed += chunk
+            else:
+                if self.get_switch_state(SENSOR_TOOLHEAD):
+                    self.gcode.respond_info(
+                        f"ACE: WARNING — flushed {total_flushed:.0f}mm but "
+                        f"toolhead sensor still triggered"
+                    )
+                    return False
+
+        finally:
+            self.gcode.run_script_from_command("G92 E0")
+            self.gcode.run_script_from_command("G90")
+
+        # --- Cleanup ---
+        self.gcode.run_script_from_command("NOZZLE_CLEAN")
+        self.gcode.run_script_from_command("TO_THROW_POSITION")
+        self._turn_off_heater_if_idle()
+
+        self.state.set("ace_filament_pos", FILAMENT_STATE_BOWDEN)
+        self.gcode.respond_info(
+            f"ACE: Flush forward complete — {total_flushed:.0f}mm purged"
+        )
+        return True
+
     def _identify_and_unload_by_cycling(
         self,
         current_tool_index,

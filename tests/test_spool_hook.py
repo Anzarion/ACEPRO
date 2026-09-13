@@ -354,6 +354,9 @@ class TestClearActiveSpoolHook:
         mock_manager.get_ace_global_enabled.return_value = True
         mock_manager.state.get.return_value = 0  # current tool
         mock_manager.smart_unload.return_value = True
+        # Spool did not deplete at the ACE, so the normal unload path applies
+        # (a bare Mock attribute would be truthy and select flush-forward).
+        mock_manager.runout_monitor._empty_spool_detected = False
 
         gcmd = MagicMock()
         gcmd.get_int.return_value = 1  # CUT_TIP=1
@@ -370,6 +373,7 @@ class TestClearActiveSpoolHook:
         mock_manager.get_ace_global_enabled.return_value = True
         mock_manager.state.get.return_value = 0
         mock_manager.smart_unload.return_value = False
+        mock_manager.runout_monitor._empty_spool_detected = False
 
         gcmd = MagicMock()
         gcmd.get_int.return_value = 1
@@ -379,3 +383,257 @@ class TestClearActiveSpoolHook:
             cmd_ACE_HANDLE_PRINT_END(gcmd)
 
         mock_manager.clear_active_spool_if_configured.assert_not_called()
+
+
+class TestFlushForwardAtPrintEnd:
+    """Tests for flush-forward logic when spool depletes near print end.
+
+    Edge case: spool empties during printing, _check_tangle() detects it
+    and sets _empty_spool_detected = True, but the print finishes (or is
+    cancelled) before the toolhead sensor triggers normal runout.  The
+    filament is orphaned in the bowden — the ACE has nothing to grip.
+
+    Expected behavior:
+    - cmd_ACE_HANDLE_PRINT_END detects the flag and calls
+      flush_forward_until_clear() instead of smart_unload().
+    - flush_forward_until_clear() extrudes forward in chunks until the
+      toolhead sensor clears.
+    - The flag is reset after handling.
+    """
+
+    @pytest.fixture
+    def mock_manager_for_flush(self):
+        """Create a mock AceManager with runout_monitor._empty_spool_detected."""
+        manager = MagicMock()
+        manager.gcode = MagicMock()
+        manager.printer = MagicMock()
+        manager.state = MagicMock()
+        manager.get_ace_global_enabled.return_value = True
+        manager.state.get.return_value = 3  # current tool T3
+
+        # Runout monitor with _empty_spool_detected flag
+        manager.runout_monitor = MagicMock()
+        manager.runout_monitor._empty_spool_detected = False
+        manager.runout_monitor.runout_detection_active = True
+
+        return manager
+
+    def test_flush_forward_called_when_spool_depleted(self, mock_manager_for_flush):
+        """When _empty_spool_detected is True, flush_forward should be called
+        instead of smart_unload."""
+        manager = mock_manager_for_flush
+        manager.runout_monitor._empty_spool_detected = True
+        manager.flush_forward_until_clear.return_value = True
+
+        gcmd = MagicMock()
+        gcmd.get_int.return_value = 1  # CUT_TIP=1
+
+        with patch("extras.ace.commands.ace_get_manager", return_value=manager), \
+             patch("extras.ace.commands.for_each_instance"):
+            from extras.ace.commands import cmd_ACE_HANDLE_PRINT_END
+            cmd_ACE_HANDLE_PRINT_END(gcmd)
+
+        manager.flush_forward_until_clear.assert_called_once_with(3)
+        manager.smart_unload.assert_not_called()
+
+    def test_smart_unload_called_when_no_depletion(self, mock_manager_for_flush):
+        """When _empty_spool_detected is False, normal smart_unload is used."""
+        manager = mock_manager_for_flush
+        manager.runout_monitor._empty_spool_detected = False
+        manager.smart_unload.return_value = True
+
+        gcmd = MagicMock()
+        gcmd.get_int.return_value = 1
+
+        with patch("extras.ace.commands.ace_get_manager", return_value=manager), \
+             patch("extras.ace.commands.for_each_instance"):
+            from extras.ace.commands import cmd_ACE_HANDLE_PRINT_END
+            cmd_ACE_HANDLE_PRINT_END(gcmd)
+
+        manager.smart_unload.assert_called_once_with(3, prepare_toolhead=True)
+        manager.flush_forward_until_clear.assert_not_called()
+
+    def test_flag_reset_after_flush_forward(self, mock_manager_for_flush):
+        """The _empty_spool_detected flag must be reset after flush forward."""
+        manager = mock_manager_for_flush
+        manager.runout_monitor._empty_spool_detected = True
+        manager.flush_forward_until_clear.return_value = True
+
+        gcmd = MagicMock()
+        gcmd.get_int.return_value = 1
+
+        with patch("extras.ace.commands.ace_get_manager", return_value=manager), \
+             patch("extras.ace.commands.for_each_instance"):
+            from extras.ace.commands import cmd_ACE_HANDLE_PRINT_END
+            cmd_ACE_HANDLE_PRINT_END(gcmd)
+
+        assert manager.runout_monitor._empty_spool_detected is False
+
+    def test_clear_spool_called_after_flush_success(self, mock_manager_for_flush):
+        """After successful flush forward, clear_active_spool must be called."""
+        manager = mock_manager_for_flush
+        manager.runout_monitor._empty_spool_detected = True
+        manager.flush_forward_until_clear.return_value = True
+
+        gcmd = MagicMock()
+        gcmd.get_int.return_value = 1
+
+        with patch("extras.ace.commands.ace_get_manager", return_value=manager), \
+             patch("extras.ace.commands.for_each_instance"):
+            from extras.ace.commands import cmd_ACE_HANDLE_PRINT_END
+            cmd_ACE_HANDLE_PRINT_END(gcmd)
+
+        manager.clear_active_spool_if_configured.assert_called_once()
+
+    def test_no_clear_spool_after_flush_failure(self, mock_manager_for_flush):
+        """If flush forward fails, clear_active_spool must NOT be called."""
+        manager = mock_manager_for_flush
+        manager.runout_monitor._empty_spool_detected = True
+        manager.flush_forward_until_clear.return_value = False
+
+        gcmd = MagicMock()
+        gcmd.get_int.return_value = 1
+
+        with patch("extras.ace.commands.ace_get_manager", return_value=manager):
+            from extras.ace.commands import cmd_ACE_HANDLE_PRINT_END
+            cmd_ACE_HANDLE_PRINT_END(gcmd)
+
+        manager.clear_active_spool_if_configured.assert_not_called()
+
+
+class TestFlushForwardMethod:
+    """Unit tests for AceManager.flush_forward_until_clear().
+
+    Tests the flush loop: extrude in chunks, check sensor, stop when clear.
+    """
+
+    @pytest.fixture
+    def mock_manager_flush(self):
+        """Create a mock manager wired for flush_forward_until_clear."""
+        from extras.ace.manager import AceManager
+
+        manager = MagicMock(spec=AceManager)
+        manager.gcode = MagicMock()
+        manager.printer = MagicMock()
+        manager.reactor = MagicMock()
+        manager.reactor.monotonic.return_value = 100.0
+        manager.state = MagicMock()
+
+        # Extruder/heater mock — already hot
+        heater = MagicMock()
+        heater.get_temp.return_value = (220.0, 220.0)
+        heater.min_extrude_temp = 170.0
+        extruder = MagicMock()
+        extruder.get_heater.return_value = heater
+        manager.printer.lookup_object.return_value = extruder
+
+        # Sensor: toolhead starts triggered, clears after some extrusion
+        manager.get_switch_state = MagicMock(return_value=True)
+
+        # _extruder_move is the workhorse — no-op in test
+        manager._extruder_move = MagicMock()
+
+        # _turn_off_heater_if_idle — no-op
+        manager._turn_off_heater_if_idle = MagicMock()
+
+        return manager
+
+    def test_flush_stops_when_sensor_clears(self, mock_manager_flush):
+        """Flush should stop as soon as toolhead sensor reports absent."""
+        manager = mock_manager_flush
+
+        # Sensor clears after first chunk
+        manager.get_switch_state.side_effect = [True, False]
+
+        from extras.ace.manager import AceManager
+        result = AceManager.flush_forward_until_clear(manager, tool_index=3)
+
+        assert result is True
+        # One chunk extruded (50mm), then sensor cleared
+        manager._extruder_move.assert_called_once()
+        args = manager._extruder_move.call_args
+        assert args[0][0] == 50.0  # chunk size
+
+    def test_flush_multiple_chunks(self, mock_manager_flush):
+        """Flush should extrude multiple chunks until sensor clears."""
+        manager = mock_manager_flush
+
+        # Sensor stays triggered for 3 chunks, clears on 4th check
+        manager.get_switch_state.side_effect = [True, True, True, False]
+
+        from extras.ace.manager import AceManager
+        result = AceManager.flush_forward_until_clear(manager, tool_index=3)
+
+        assert result is True
+        assert manager._extruder_move.call_count == 3
+
+    def test_flush_fails_at_max_distance(self, mock_manager_flush):
+        """If sensor never clears within MAX_FLUSH_MM, return False."""
+        manager = mock_manager_flush
+
+        # Sensor never clears
+        manager.get_switch_state.return_value = True
+
+        from extras.ace.manager import AceManager
+        result = AceManager.flush_forward_until_clear(manager, tool_index=3)
+
+        assert result is False
+
+    def test_flush_immediate_clear(self, mock_manager_flush):
+        """If sensor is already clear at start, no extrusion needed."""
+        manager = mock_manager_flush
+
+        # Sensor already clear
+        manager.get_switch_state.return_value = False
+
+        from extras.ace.manager import AceManager
+        result = AceManager.flush_forward_until_clear(manager, tool_index=3)
+
+        assert result is True
+        manager._extruder_move.assert_not_called()
+
+    def test_flush_heats_when_cold(self, mock_manager_flush):
+        """When nozzle is below min_extrude_temp, M109 must be called."""
+        manager = mock_manager_flush
+
+        # Nozzle is cold
+        heater = manager.printer.lookup_object.return_value.get_heater.return_value
+        heater.get_temp.return_value = (30.0, 30.0)
+        heater.min_extrude_temp = 170.0
+
+        # Sensor clears immediately
+        manager.get_switch_state.return_value = False
+
+        from extras.ace.manager import AceManager
+
+        # Mock get_ace_instance_and_slot_for_tool for temp lookup
+        ace_inst = MagicMock()
+        ace_inst.inventory = [
+            {}, {}, {}, {"temp": 240}
+        ]
+        with patch(
+            "extras.ace.manager.get_ace_instance_and_slot_for_tool",
+            return_value=(ace_inst, 3)
+        ):
+            result = AceManager.flush_forward_until_clear(manager, tool_index=3)
+
+        assert result is True
+        # Check that M109 was called with the inventory temp
+        m109_calls = [
+            c for c in manager.gcode.run_script_from_command.call_args_list
+            if "M109" in str(c)
+        ]
+        assert len(m109_calls) == 1
+        assert "240" in str(m109_calls[0])
+
+    def test_flush_cleans_up_gcode_state(self, mock_manager_flush):
+        """G92 E0 and G90 must be called in finally block."""
+        manager = mock_manager_flush
+        manager.get_switch_state.return_value = False  # immediate clear
+
+        from extras.ace.manager import AceManager
+        AceManager.flush_forward_until_clear(manager, tool_index=3)
+
+        gcode_calls = [str(c) for c in manager.gcode.run_script_from_command.call_args_list]
+        assert any("G92 E0" in c for c in gcode_calls)
+        assert any("G90" in c for c in gcode_calls)

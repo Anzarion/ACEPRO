@@ -159,6 +159,14 @@ class RunoutMonitor:
         self._pt_suspect_since = None
         # One-shot latch for the empty-slot info message per depletion
         self._pt_empty_notified = False
+        # Durable marker: the ACE reported the assist slot empty during
+        # this print, i.e. the spool ran out at the ACE.  Deliberately NOT
+        # cleared by _reset_tangle_phase() - that fires on print stop,
+        # which is exactly when ACE_HANDLE_PRINT_END needs to read it to
+        # decide between smart_unload and flush_forward_until_clear.
+        # Cleared only when normal runout handling takes over at the
+        # toolhead sensor, or when a new print starts.
+        self._empty_spool_detected = False
         self._pt_unsupported_logged = False
         # Last _is_tangle_detection_active() result seen by the monitor
         # loop; used to clear stale phase state on an off→on edge (the
@@ -273,6 +281,11 @@ class RunoutMonitor:
 
         if print_just_started:
             self.gcode.respond_info("ACE: Print started - initializing runout detection")
+
+            # Safety net: a cancelled or errored print may not have reached
+            # ACE_HANDLE_PRINT_END, so the depletion marker could still be
+            # set from the previous job. Never carry it into a new print.
+            self._empty_spool_detected = False
 
             # Force initialize baseline
             self.prev_toolhead_sensor_state = current_sensor_state
@@ -661,6 +674,9 @@ class RunoutMonitor:
                     f"filament prints out."
                 )
             self._pt_empty_notified = True
+            # Durable: survives _reset_tangle_phase() so that print end can
+            # tell "spool ran out at the ACE" from a normal finish.
+            self._empty_spool_detected = True
             self._pt_phase_armed = False
             self._pt_last_value_s = 0.0
             self._pt_suspect_since = None
@@ -944,6 +960,9 @@ class RunoutMonitor:
         self.runout_handling_in_progress = True
         self.prev_toolhead_sensor_state = None
         self._runout_false_count = 0
+        # Normal runout handling takes over from here, so the bowden tail is
+        # no longer orphaned - print end must not flush it forward.
+        self._empty_spool_detected = False
 
         try:
             # Step 1: PAUSE immediately

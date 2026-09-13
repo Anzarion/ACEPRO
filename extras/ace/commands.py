@@ -1395,7 +1395,18 @@ def cmd_ACE_HANDLE_PRINT_END(gcmd):
 
         gcmd.respond_info(f"ACE: PRINT_END: unloading tool T{tool_index}")
 
-        success = manager.smart_unload(tool_index, prepare_toolhead=True)
+        # When the spool emptied during printing but the print ended
+        # before the toolhead sensor triggered runout, the filament is
+        # orphaned in the bowden — the ACE has nothing to grip for
+        # retraction.  Flush it forward through the nozzle instead.
+        if manager.runout_monitor._empty_spool_detected:
+            gcmd.respond_info(
+                "ACE: Spool depleted — flushing orphaned filament forward"
+            )
+            success = manager.flush_forward_until_clear(tool_index)
+            manager.runout_monitor._empty_spool_detected = False
+        else:
+            success = manager.smart_unload(tool_index, prepare_toolhead=True)
         if success:
             gcmd.respond_info(f"ACE: Tool T{tool_index} successfully unloaded")
             manager.state.set("ace_current_index", -1)

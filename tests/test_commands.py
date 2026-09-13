@@ -1353,6 +1353,9 @@ class TestDryingCommands:
         """Test ACE_HANDLE_PRINT_END with CUT_TIP=1 (default)."""
         mock_gcmd.get_int = Mock(return_value=1)  # CUT_TIP=1
         INSTANCE_MANAGERS[0].state.get = Mock(return_value=0)
+        # Spool did not deplete at the ACE, so the normal unload path applies
+        # (a bare Mock attribute would be truthy and select flush-forward).
+        INSTANCE_MANAGERS[0].runout_monitor._empty_spool_detected = False
         ace.commands.cmd_ACE_HANDLE_PRINT_END(mock_gcmd)
         assert INSTANCE_MANAGERS[0].smart_unload.called
 
