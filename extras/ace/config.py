@@ -204,8 +204,29 @@ def read_ace_config(config):
     ace_config["tangle_detection"] = config.getboolean(
         "tangle_detection", False
     )
+    # Threshold default/floor are hardware-derived: ACE2 firmware's STARVED
+    # assist retry (spool ran out at the ACE) self-resets cont_assist_time at
+    # ~3.9 s (fw V1.1.31), so thresholds below ~4 s sit inside that band and
+    # rely solely on the empty-slot gate to avoid false pauses on every ACE2
+    # runout.  RunoutMonitor clamps to its TANGLE_PUMP_TIME_FLOOR.
     ace_config["tangle_pump_time"] = config.getfloat(
-        "tangle_pump_time", 4.0
+        "tangle_pump_time", 5.0
+    )
+    # Verdict window after a threshold crossing: wait this long for the
+    # slot-empty runout signal (ACE1 reports it ~4 s after the crossing)
+    # before pausing as a confirmed tangle.  Fallback only — most tangles
+    # exit earlier via tangle_pump_time_hard, and ACE2 (sensor-live slot
+    # state) pauses at the crossing itself.  0 = pause immediately at the
+    # threshold (false-pauses on ACE1 spool runouts).
+    ace_config["tangle_verify_time"] = config.getfloat(
+        "tangle_verify_time", 7.0
+    )
+    # Continuous-pumping hard ceiling: starved pumping is firmware-capped
+    # (ACE1 give-up ~5-6 s, ACE2 retry cap ~3.9 s), so reaching this value
+    # proves a real blockage — pause immediately, bypassing the verify
+    # window.  RunoutMonitor clamps to its TANGLE_HARD_LIMIT_FLOOR (6.5).
+    ace_config["tangle_pump_time_hard"] = config.getfloat(
+        "tangle_pump_time_hard", 8.0
     )
     # Persistence mode controls when set_and_save() actually writes to disk.
     # - deferred:  set_and_save() behaves like set() — RAM + dirty mark only;
