@@ -1416,7 +1416,8 @@ is physically present.
 
 
 ## Configuration Example
-This example is just for reference; check printer_KS1.cfg / printer_K3.cfg for live values.
+This example is just for reference; `config/voron/acepro_setting.cfg` holds the
+values this machine actually runs.
 
 ```ini
 [ace]
