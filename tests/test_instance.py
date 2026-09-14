@@ -755,7 +755,7 @@ class TestRetract(unittest.TestCase):
         self.assertEqual(sent_request.get("target_device_id"), 7)
 
 
-class TestFeedFilamentIntoToolhead(unittest.TestCase):
+class TestFeedFilamentIntoToolheadPreconditions(unittest.TestCase):
     """Branch coverage for _feed_filament_into_toolhead."""
 
     def setUp(self):
@@ -768,11 +768,16 @@ class TestFeedFilamentIntoToolhead(unittest.TestCase):
         self.mock_save_vars = Mock()
         self.mock_save_vars.allVariables = {}
 
+        # One stable toolhead mock: building it inside the lambda handed out a
+        # fresh object per lookup, so anything the code called on it was
+        # invisible to assertions made from the test.
+        self.mock_toolhead = Mock(wait_moves=Mock())
+
         self.mock_printer.get_reactor.return_value = self.mock_reactor
         self.mock_printer.lookup_object.side_effect = lambda name, default=None: {
             'gcode': self.mock_gcode,
             'save_variables': self.mock_save_vars,
-            'toolhead': Mock(wait_moves=Mock()),
+            'toolhead': self.mock_toolhead,
         }.get(name, default)
         self.mock_reactor.monotonic.return_value = 0.0
         self.mock_reactor.pause = Mock()
@@ -880,8 +885,10 @@ class TestFeedFilamentIntoToolhead(unittest.TestCase):
 
         self.assertEqual(result, instance.toolhead_full_purge_length)
         manager.get_switch_state.assert_not_called()
-        manager.state.set.assert_called_once_with("ace_filament_pos", FILAMENT_STATE_TOOLHEAD)
-        manager.state.set_and_save.assert_called_once_with("ace_filament_pos", FILAMENT_STATE_NOZZLE)
+        # The feed walks the position forward in two steps; persistence is
+        # deferred, so both go through state.set rather than set_and_save.
+        manager.state.set.assert_any_call("ace_filament_pos", FILAMENT_STATE_TOOLHEAD)
+        manager.state.set.assert_any_call("ace_filament_pos", FILAMENT_STATE_NOZZLE)
 
     @patch('ace.instance.AceSerialManager')
     def test_precondition_blocks_toolhead_when_rdm_available(self, mock_serial_mgr_class):
@@ -2671,7 +2678,7 @@ class TestFeedFilamentIntoToolhead(unittest.TestCase):
         self.assertIn("filament stuck in RMS", str(context.exception))
 
 
-class TestSmartUnloadSlot(unittest.TestCase):
+class TestSmartUnloadSlotManagerDependency(unittest.TestCase):
     """Test smart unload slot functionality."""
 
     def setUp(self):
