@@ -530,6 +530,11 @@ class TestFlushForwardMethod:
         # Sensor: toolhead starts triggered, clears after some extrusion
         manager.get_switch_state = MagicMock(return_value=True)
 
+        # The flush derives its safety cap from total_max_feeding_length.
+        # A bare MagicMock would answer float() with 1.0 and cap the flush at
+        # a single millimetre, so give it the machine's real value.
+        manager._get_config_for_tool = MagicMock(return_value=3000.0)
+
         # _extruder_move is the workhorse — no-op in test
         manager._extruder_move = MagicMock()
 
@@ -626,8 +631,9 @@ class TestFlushForwardMethod:
         assert len(m109_calls) == 1
         assert "240" in str(m109_calls[0])
 
-    def test_flush_cleans_up_gcode_state(self, mock_manager_flush):
-        """G92 E0 and G90 must be called in finally block."""
+    def test_flush_restores_the_callers_gcode_state(self, mock_manager_flush):
+        """The flush runs inside PRINT_END and inside a toolchange, both of
+        which own their G-code state - it must hand back what it was given."""
         manager = mock_manager_flush
         manager.get_switch_state.return_value = False  # immediate clear
 
@@ -635,8 +641,59 @@ class TestFlushForwardMethod:
         AceManager.flush_forward_until_clear(manager, tool_index=3)
 
         gcode_calls = [str(c) for c in manager.gcode.run_script_from_command.call_args_list]
-        assert any("G92 E0" in c for c in gcode_calls)
-        assert any("G90" in c for c in gcode_calls)
+        assert any("SAVE_GCODE_STATE NAME=ACE_FLUSH_FORWARD" in c
+                   for c in gcode_calls)
+        assert any("RESTORE_GCODE_STATE NAME=ACE_FLUSH_FORWARD MOVE=0" in c
+                   for c in gcode_calls)
+
+    def test_flush_resyncs_gcode_position_before_restoring(self, mock_manager_flush):
+        """_extruder_move() bypasses the G-code layer, so last_position is
+        stale. RESTORE_GCODE_STATE compensates E against it - restoring
+        without a resync first would command a huge retract afterwards."""
+        manager = mock_manager_flush
+        manager.get_switch_state.return_value = False
+
+        gcode_move = MagicMock()
+        manager.printer.lookup_object.side_effect = lambda n, d=None: (
+            gcode_move if n == "gcode_move"
+            else manager.printer.lookup_object.return_value
+        )
+
+        from extras.ace.manager import AceManager
+        AceManager.flush_forward_until_clear(manager, tool_index=3)
+
+        gcode_move.reset_last_position.assert_called_once()
+
+    def test_flush_cap_comes_from_the_config(self, mock_manager_flush):
+        """The safety cap must track total_max_feeding_length, not a constant
+        that silently stops matching the bowden when the tube is changed."""
+        manager = mock_manager_flush
+        manager._get_config_for_tool.return_value = 500.0
+        manager.get_switch_state.return_value = True  # never clears
+
+        from extras.ace.manager import AceManager
+        result = AceManager.flush_forward_until_clear(manager, tool_index=3)
+
+        assert result is False
+        manager._get_config_for_tool.assert_called_with(
+            3, "total_max_feeding_length"
+        )
+        # 500 mm cap in 50 mm chunks
+        assert manager._extruder_move.call_count == 10
+        total = sum(c.args[0] for c in manager._extruder_move.call_args_list)
+        assert total == 500.0
+
+    def test_flush_falls_back_when_config_unreadable(self, mock_manager_flush):
+        """An unreadable config must not disable the flush entirely."""
+        manager = mock_manager_flush
+        manager._get_config_for_tool.side_effect = Exception("no such param")
+        manager.get_switch_state.side_effect = [True, False]
+
+        from extras.ace.manager import AceManager
+        result = AceManager.flush_forward_until_clear(manager, tool_index=3)
+
+        assert result is True
+        manager._extruder_move.assert_called_once()
 
     def test_flush_holds_target_when_hot_but_heater_off(self, mock_manager_flush):
         """Regression: nozzle still hot but target already 0 (PRINT_END did

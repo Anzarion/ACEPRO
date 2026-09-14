@@ -1187,13 +1187,30 @@ class AceManager:
             bool: True if filament was successfully purged.
         """
         FLUSH_CHUNK_MM = 50.0
+        # 3 mm/s of 1.75 mm filament is 7.2 mm3/s sustained.  Comfortable for
+        # the Phaetus Dragon HF this machine runs; revisit if the hotend
+        # changes, since the flush holds that rate for minutes on end.
         FLUSH_SPEED_MMS = 3.0
-        MAX_FLUSH_MM = 3000.0  # safety cap (~2.4m bowden + margin)
+
+        # Safety cap: the orphaned filament can at most span the ACE-to-nozzle
+        # path, so derive it from the configured maximum feed rather than
+        # hardcoding a length that silently stops matching the bowden.
+        try:
+            max_flush_mm = float(self._get_config_for_tool(
+                tool_index, "total_max_feeding_length"))
+        except Exception:
+            max_flush_mm = 3000.0
 
         self.gcode.respond_info(
             f"ACE: Flushing orphaned filament forward for T{tool_index} "
-            f"(spool depleted, ACE cannot retract)"
+            f"(spool depleted, ACE cannot retract, max {max_flush_mm:.0f}mm)"
         )
+
+        # Preserve the caller's coordinate mode / offsets: this runs inside
+        # PRINT_END and inside a toolchange, both of which have their own
+        # G-code state.  Restored in the finally below.
+        self.gcode.run_script_from_command(
+            "SAVE_GCODE_STATE NAME=ACE_FLUSH_FORWARD")
 
         # --- Position over bucket ---
         self.gcode.run_script_from_command("TO_THROW_POSITION")
@@ -1233,12 +1250,12 @@ class AceManager:
         cleared = False
 
         try:
-            while total_flushed < MAX_FLUSH_MM:
+            while total_flushed < max_flush_mm:
                 if not self.get_switch_state(SENSOR_TOOLHEAD):
                     cleared = True
                     break
 
-                chunk = min(FLUSH_CHUNK_MM, MAX_FLUSH_MM - total_flushed)
+                chunk = min(FLUSH_CHUNK_MM, max_flush_mm - total_flushed)
                 self._extruder_move(chunk, FLUSH_SPEED_MMS, wait_for_move_end=True)
                 total_flushed += chunk
             else:
@@ -1251,8 +1268,17 @@ class AceManager:
             self._turn_off_heater_if_idle()
             raise
         finally:
-            self.gcode.run_script_from_command("G92 E0")
-            self.gcode.run_script_from_command("G90")
+            # _extruder_move() drives toolhead.move() directly, so the G-code
+            # layer's idea of E is stale.  Resync it BEFORE restoring, because
+            # RESTORE_GCODE_STATE compensates the extruder by the difference
+            # between the live and the saved position - against a stale value
+            # that correction would command a huge retract on the next move.
+            try:
+                self.printer.lookup_object("gcode_move").reset_last_position()
+            except Exception:
+                pass
+            self.gcode.run_script_from_command(
+                "RESTORE_GCODE_STATE NAME=ACE_FLUSH_FORWARD MOVE=0")
 
         if not cleared:
             self.gcode.respond_info(
