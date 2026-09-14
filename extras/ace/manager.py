@@ -2113,6 +2113,129 @@ class AceManager:
         except Exception as e:
             self.gcode.respond_info(f"ACE: Error closing dialog: {e}")
 
+    def disable_feed_assist_for_tool(self, tool_index, reason):
+        """Disable a tool's feed assist if the driver tracks it on its slot.
+
+        Used where assist must not survive but no unload (with its own
+        disable-before-motion step) runs:
+        - Endless-spool skip-unload (slot already empty): without this the
+          outgoing tool's assist stays enabled (driver index AND device)
+          while the new tool's instance feeds.  The ACE keeps
+          starved-cycling the empty slot, and the stale index makes tangle
+          detection watch the WRONG instance (a tangle on the freshly
+          loaded tool then goes undetected).
+        - Toolhead runout: the tail is past the toolhead, assist has
+          nothing to push - and on ACE2 a surviving assist keeps the
+          device busy-by-design, deadlocking the wait_ready of any
+          subsequent reload.  Clearing the index also stops the reconcile
+          layer from restoring assist onto the empty slot when a cut
+          remnant flaps the slot sensor back to ready.
+
+        Called by RunoutMonitor._handle_runout_detected() via getattr, so a
+        missing method degrades silently - which is exactly why it must
+        exist here rather than only upstream.
+
+        Failures are reported, never raised - callers must proceed.
+        """
+        try:
+            out_ace, out_slot = get_ace_instance_and_slot_for_tool(
+                tool_index
+            )
+            if (out_ace is not None
+                    and out_ace._feed_assist_index == out_slot):
+                self.gcode.respond_info(
+                    f"ACE: Disabling feed assist on T{tool_index} - {reason}"
+                )
+                out_ace._disable_feed_assist(out_slot)
+        except Exception as e:
+            self.gcode.respond_info(
+                f"ACE: Warning - could not disable feed "
+                f"assist for T{tool_index}: {e}"
+            )
+
+    def verify_feed_assist_for_tool(self, tool_index):
+        """Ensure feed assist is active on the loaded tool's slot.
+
+        Resume safety net: an ACE power cycle, klippy restart, or a
+        busy-skipped reconnect restore can leave a resumed print without
+        feed assist - the print then extrudes nothing once path friction
+        exceeds what the extruder can pull.  Called on the paused->printing
+        transition by RunoutMonitor._verify_feed_assist_on_resume() via
+        getattr; no-op when assist is already active on the right slot.
+        Blocks (wait_ready) - run from a reactor callback greenlet, not
+        from a timer callback.
+
+        Note: this fork does not maintain ``ace_target_index`` (upstream
+        sets it in perform_tool_change), so the pending-toolchange guard
+        below never fires here.  The loaded-state guard still applies and
+        is what actually prevents arming assist on an unloaded tool.
+        """
+        try:
+            instance, slot = get_ace_instance_and_slot_for_tool(tool_index)
+        except Exception:
+            return False
+        if instance is None or slot is None or slot < 0:
+            return False
+        if not instance.serial_mgr.is_connected():
+            self.gcode.respond_info(
+                f"ACE: Resume feed assist check skipped for T{tool_index} - "
+                f"ACE[{instance.instance_num}] not connected"
+            )
+            return False
+
+        # Guard: only a tool that is plausibly LOADED may get assist
+        # re-enabled.  ace_current_index can point at a tool whose load
+        # FAILED (failure handlers preserve it for the Retry prompt) -
+        # re-arming assist then pushes a parked filament into the path.
+        # "Loaded" means filament_pos at toolhead/nozzle, or the toolhead
+        # sensor seeing filament (covers a stale pos).  Fail-open:
+        # unreadable state keeps the safety net's protective re-enable.
+        try:
+            if self.toolchange_in_progress is True:
+                return False
+            pending_target = int(self.state.get("ace_target_index", -1))
+            if pending_target != -1 and pending_target != tool_index:
+                self.gcode.respond_info(
+                    f"ACE: Resume feed assist check skipped for T{tool_index} "
+                    f"- unconfirmed toolchange to T{pending_target} pending "
+                    f"(its retry owns assist)"
+                )
+                return False
+            pos = self.state.get("ace_filament_pos", None)
+            pos_loaded = pos in (
+                FILAMENT_STATE_TOOLHEAD, FILAMENT_STATE_NOZZLE
+            )
+            sensor_loaded = False
+            try:
+                sensor_loaded = self.get_switch_state(SENSOR_TOOLHEAD) is True
+            except Exception:
+                pass
+            if pos is not None and not pos_loaded and not sensor_loaded:
+                self.gcode.respond_info(
+                    f"ACE: NOT re-enabling feed assist for T{tool_index} - "
+                    f"tool is not loaded (filament_pos='{pos}', toolhead "
+                    f"sensor clear). Assist on an unloaded tool would push "
+                    f"parked filament into the path."
+                )
+                return False
+        except (AttributeError, TypeError, ValueError):
+            pass
+
+        if instance._get_current_feed_assist_index() == slot:
+            return True
+        self.gcode.respond_info(
+            f"ACE: Feed assist not active on resumed tool T{tool_index} - "
+            f"re-enabling (ACE[{instance.instance_num}] slot {slot})"
+        )
+        try:
+            instance._enable_feed_assist(slot)
+            return True
+        except Exception as e:
+            self.gcode.respond_info(
+                f"ACE: Failed to re-enable feed assist on T{tool_index}: {e}"
+            )
+            return False
+
     def ensure_tool_slot_loaded(self, tool_index):
         """Raise if the target tool's ACE slot reports empty.
 
