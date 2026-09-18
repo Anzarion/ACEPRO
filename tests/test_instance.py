@@ -74,6 +74,7 @@ class TestAceInstance(unittest.TestCase):
             'status_debug_logging': True,
             'rdm_overshoot_length': 50.0,
             'flush_overshoot_length': 50.0,
+            'flush_forward_speed': 6.0,
         }
 
     def _mock_lookup_object(self, name, default=None):
@@ -405,6 +406,7 @@ class TestRegisterToolMacros(unittest.TestCase):
             'status_debug_logging': True,
             'rdm_overshoot_length': 50.0,
             'flush_overshoot_length': 50.0,
+            'flush_forward_speed': 6.0,
         }
 
     @patch('ace.instance.AceSerialManager')
@@ -478,6 +480,7 @@ class TestWaitReady(unittest.TestCase):
             'status_debug_logging': True,
             'rdm_overshoot_length': 50.0,
             'flush_overshoot_length': 50.0,
+            'flush_forward_speed': 6.0,
         }
 
     @patch('ace.instance.AceSerialManager')
@@ -585,6 +588,7 @@ class TestIsSlotEmpty(unittest.TestCase):
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
             'flush_overshoot_length': 50.0,
+            'flush_forward_speed': 6.0,
         }
 
     @patch('ace.instance.AceSerialManager')
@@ -650,6 +654,7 @@ class TestRetract(unittest.TestCase):
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
             'flush_overshoot_length': 50.0,
+            'flush_forward_speed': 6.0,
         }
 
     def _time_generator(self, start=0.0, step=0.5):
@@ -810,6 +815,7 @@ class TestFeedFilamentIntoToolheadPreconditions(unittest.TestCase):
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
             'flush_overshoot_length': 50.0,
+            'flush_forward_speed': 6.0,
         }
 
     @patch('ace.instance.AceSerialManager')
@@ -995,6 +1001,7 @@ class TestFeedAndStopHelpers(unittest.TestCase):
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
             'flush_overshoot_length': 50.0,
+            'flush_forward_speed': 6.0,
         }
 
     @patch('ace.instance.AceSerialManager')
@@ -1162,6 +1169,7 @@ class TestFeedAssist(unittest.TestCase):
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
             'flush_overshoot_length': 50.0,
+            'flush_forward_speed': 6.0,
         }
 
     def _mock_lookup_object(self, name, default=None):
@@ -1497,6 +1505,7 @@ class TestInventoryManagement(unittest.TestCase):
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
             'flush_overshoot_length': 50.0,
+            'flush_forward_speed': 6.0,
         }
 
     def _mock_lookup_object(self, name, default=None):
@@ -1580,6 +1589,7 @@ class TestStatusCallbacks(unittest.TestCase):
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
             'flush_overshoot_length': 50.0,
+            'flush_forward_speed': 6.0,
         }
 
     def _mock_lookup_object(self, name, default=None):
@@ -2367,6 +2377,7 @@ class TestFeedRetractOperations(unittest.TestCase):
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
             'flush_overshoot_length': 50.0,
+            'flush_forward_speed': 6.0,
         }
 
     @patch('ace.instance.AceSerialManager')
@@ -2473,6 +2484,7 @@ class TestHeartbeat(unittest.TestCase):
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
             'flush_overshoot_length': 50.0,
+            'flush_forward_speed': 6.0,
         }
 
     @patch('ace.instance.AceSerialManager')
@@ -2532,6 +2544,7 @@ class TestFeedFilamentIntoToolhead(unittest.TestCase):
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
             'flush_overshoot_length': 50.0,
+            'flush_forward_speed': 6.0,
         }
 
     @patch('ace.instance.AceSerialManager')
@@ -2738,6 +2751,7 @@ class TestSmartUnloadSlotManagerDependency(unittest.TestCase):
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
             'flush_overshoot_length': 50.0,
+            'flush_forward_speed': 6.0,
         }
 
     @patch('ace.instance.AceSerialManager')
@@ -2808,6 +2822,7 @@ class TestStatusUpdateCallback(unittest.TestCase):
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
             'flush_overshoot_length': 50.0,
+            'flush_forward_speed': 6.0,
         }
 
     @patch('ace.instance.AceSerialManager')
@@ -3014,6 +3029,7 @@ class TestWaitForCondition(unittest.TestCase):
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
             'flush_overshoot_length': 50.0,
+            'flush_forward_speed': 6.0,
         }
 
     @patch('ace.instance.AceSerialManager')
@@ -3086,6 +3102,7 @@ class TestManagerProperty(unittest.TestCase):
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
             'flush_overshoot_length': 50.0,
+            'flush_forward_speed': 6.0,
         }
 
     def _mock_lookup_object(self, name, default=None):
@@ -3170,6 +3187,7 @@ class TestSensorTriggerMonitor(unittest.TestCase):
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
             'flush_overshoot_length': 50.0,
+            'flush_forward_speed': 6.0,
         }
 
     def tearDown(self):
@@ -3312,6 +3330,7 @@ class TestGetStatus(unittest.TestCase):
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
             'flush_overshoot_length': 50.0,
+            'flush_forward_speed': 6.0,
         }
 
     def _mock_lookup_object(self, name, default=None):
@@ -3396,6 +3415,7 @@ class TestInventoryJsonEmission(unittest.TestCase):
             'status_debug_logging': True,
             'rdm_overshoot_length': 50.0,
             'flush_overshoot_length': 50.0,
+            'flush_forward_speed': 6.0,
         }
     
     def _mock_lookup_object(self, name, default=None):
@@ -3549,6 +3569,7 @@ class TestFeedFilamentToVerificationSensor(unittest.TestCase):
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
             'flush_overshoot_length': 50.0,
+            'flush_forward_speed': 6.0,
         }
 
         INSTANCE_MANAGERS.clear()
@@ -3711,6 +3732,7 @@ class TestExtruderMove(unittest.TestCase):
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
             'flush_overshoot_length': 50.0,
+            'flush_forward_speed': 6.0,
         }
 
     def _mock_lookup_object(self, name, default=None):
@@ -3799,6 +3821,7 @@ class TestSmartUnloadSlot(unittest.TestCase):
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
             'flush_overshoot_length': 50.0,
+            'flush_forward_speed': 6.0,
         }
 
     def _lookup(self, name, default=None):
@@ -4004,6 +4027,7 @@ class TestRmdTriggeredUnloadSlot(unittest.TestCase):
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
             'flush_overshoot_length': 50.0,
+            'flush_forward_speed': 6.0,
         }
 
     def _time_generator(self, start=0.0, step=0.5):
@@ -4124,6 +4148,7 @@ class TestFeedFilamentWithWaitForResponse(unittest.TestCase):
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
             'flush_overshoot_length': 50.0,
+            'flush_forward_speed': 6.0,
         }
 
     def _time_generator(self, start=0.0, step=1.0):
@@ -4230,6 +4255,7 @@ class TestFeedToToolheadWithExtruderAssist(unittest.TestCase):
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
             'flush_overshoot_length': 50.0,
+            'flush_forward_speed': 6.0,
         }
 
     def _time_generator(self, start=0.0, step=0.2):

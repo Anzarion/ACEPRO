@@ -98,6 +98,7 @@ class AceInstance:
         self.parkposition_to_rdm_length = float(ace_config["parkposition_to_rdm_length"])
         self.rdm_overshoot_length = float(ace_config["rdm_overshoot_length"])
         self.flush_overshoot_length = float(ace_config["flush_overshoot_length"])
+        self.flush_forward_speed = float(ace_config["flush_forward_speed"])
         self.incremental_feeding_length = float(ace_config["incremental_feeding_length"])
         self.incremental_feeding_speed = float(ace_config["incremental_feeding_speed"])
         self.extruder_feeding_length = float(ace_config["extruder_feeding_length"])

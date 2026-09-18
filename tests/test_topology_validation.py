@@ -308,6 +308,7 @@ class TestFeedAssistTopologyTracking:
             "timeout_multiplier": 1.0,
             "rdm_overshoot_length": 50.0,
             "flush_overshoot_length": 50.0,
+            "flush_forward_speed": 6.0,
         }
 
         instance = AceInstance(0, ace_config, mock_printer)
@@ -377,6 +378,7 @@ class TestFeedAssistRestoration:
             "feed_assist_active_after_ace_connect": True,
             "rdm_overshoot_length": 50.0,
             "flush_overshoot_length": 50.0,
+            "flush_forward_speed": 6.0,
         }
         
         instance = AceInstance(0, ace_config, mock_printer)
@@ -477,6 +479,7 @@ class TestReconnectionScenarios:
             "feed_assist_active_after_ace_connect": True,
             "rdm_overshoot_length": 50.0,
             "flush_overshoot_length": 50.0,
+            "flush_forward_speed": 6.0,
         }
         
         instance = AceInstance(0, ace_config, mock_printer)
@@ -554,6 +557,7 @@ class TestReconnectionScenarios:
             "feed_assist_active_after_ace_connect": True,
             "rdm_overshoot_length": 50.0,
             "flush_overshoot_length": 50.0,
+            "flush_forward_speed": 6.0,
         }
         
         # Instance 0 was at topology 2, instance 1 was at topology 3

@@ -1215,11 +1215,21 @@ class AceManager:
         Returns:
             bool: True if filament was successfully purged.
         """
+        # The sensor is only read between chunks, so this also sets how far
+        # past the clear point the flush can run before it notices.
         FLUSH_CHUNK_MM = 50.0
-        # 3 mm/s of 1.75 mm filament is 7.2 mm3/s sustained.  Comfortable for
-        # the Phaetus Dragon HF this machine runs; revisit if the hotend
-        # changes, since the flush holds that rate for minutes on end.
-        FLUSH_SPEED_MMS = 3.0
+
+        # Rate the flush holds for minutes on end.  1.75 mm filament carries
+        # 2.405 mm2, so 6 mm/s is 14.4 mm3/s - within reach of the Dragon HF
+        # this machine runs, and the nozzle extrudes into the bucket without
+        # layer backpressure.  The limit that bites first is not the melt zone
+        # but extruder grip: it pushes the whole strand against the friction of
+        # a 2.1 m bowden, and the gears give before the hotend does.
+        try:
+            flush_speed_mms = float(self._get_config_for_tool(
+                tool_index, "flush_forward_speed"))
+        except Exception:
+            flush_speed_mms = 6.0
 
         # Safety cap: the orphaned filament can at most span the ACE-to-nozzle
         # path, so derive it from the configured maximum feed rather than
@@ -1297,7 +1307,7 @@ class AceManager:
                     break
 
                 chunk = min(FLUSH_CHUNK_MM, max_flush_mm - total_flushed)
-                self._extruder_move(chunk, FLUSH_SPEED_MMS, wait_for_move_end=True)
+                self._extruder_move(chunk, flush_speed_mms, wait_for_move_end=True)
                 total_flushed += chunk
             else:
                 # Safety cap reached without a break - the sensor may still
@@ -1316,7 +1326,7 @@ class AceManager:
                         f"butts against it instead of being gripped"
                     )
                     self._extruder_move(
-                        overshoot_mm, FLUSH_SPEED_MMS, wait_for_move_end=True)
+                        overshoot_mm, flush_speed_mms, wait_for_move_end=True)
                     overshot = overshoot_mm
         except Exception:
             # Never leave a hot nozzle parked over the bucket on an aborted

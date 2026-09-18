@@ -542,6 +542,7 @@ class TestFlushForwardMethod:
         _config_values = {
             "total_max_feeding_length": 3000.0,
             "flush_overshoot_length": 65.0,
+            "flush_forward_speed": 8.0,
         }
 
         def _config(tool_index, param_name):
@@ -631,6 +632,7 @@ class TestFlushForwardMethod:
         manager._get_config_for_tool = MagicMock(side_effect=lambda t, p: {
             "total_max_feeding_length": 3000.0,
             "flush_overshoot_length": 90.0,
+            "flush_forward_speed": 8.0,
         }[p])
         manager.get_switch_state.side_effect = [True, False]
 
@@ -646,6 +648,7 @@ class TestFlushForwardMethod:
         manager._get_config_for_tool = MagicMock(side_effect=lambda t, p: {
             "total_max_feeding_length": 3000.0,
             "flush_overshoot_length": 0.0,
+            "flush_forward_speed": 8.0,
         }[p])
         manager.get_switch_state.side_effect = [True, False]
 
@@ -654,6 +657,22 @@ class TestFlushForwardMethod:
 
         moves = [c[0][0] for c in manager._extruder_move.call_args_list]
         assert moves == [50.0]
+
+    def test_flush_speed_comes_from_config_for_every_move(self, mock_manager_flush):
+        """Both the chunks and the overshoot run at the configured rate.
+
+        The rate is a machine property - it is bounded by how hard the
+        extruder can push a whole strand through the bowden, not by anything
+        in this module - so it must not sit in the code as a constant.
+        """
+        manager = mock_manager_flush
+        manager.get_switch_state.side_effect = [True, True, False]
+
+        from extras.ace.manager import AceManager
+        assert AceManager.flush_forward_until_clear(manager, tool_index=3) is True
+
+        speeds = [c[0][1] for c in manager._extruder_move.call_args_list]
+        assert speeds == [8.0, 8.0, 8.0]
 
     def test_overshoot_runs_before_the_heater_is_released(self, mock_manager_flush):
         """Ordering matters: the overshoot is an extrusion.
@@ -752,6 +771,7 @@ class TestFlushForwardMethod:
         manager._get_config_for_tool = MagicMock(side_effect=lambda t, p: {
             "total_max_feeding_length": 500.0,
             "flush_overshoot_length": 65.0,
+            "flush_forward_speed": 8.0,
         }[p])
         manager.get_switch_state.return_value = True  # never clears
 

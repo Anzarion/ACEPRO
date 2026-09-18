@@ -153,6 +153,11 @@ def read_ace_config(config):
     # against it instead of being driven in.  Must therefore exceed the
     # sensor-to-gears distance; sensor-to-nozzle is the safe choice.
     ace_config["flush_overshoot_length"] = config.getfloat("flush_overshoot_length", 10.0)
+    # Extruder speed (mm/s of filament) the depleted-spool flush holds for the
+    # whole purge.  6 mm/s of 1.75 mm stock is 14.4 mm3/s.  Raise it only as
+    # far as the extruder can push the whole strand through the bowden - the
+    # gears lose grip long before the hotend runs out of melting capacity.
+    ace_config["flush_forward_speed"] = config.getfloat("flush_forward_speed", 6.0)
     ace_config["toolhead_retraction_speed"] = config.getint("toolhead_retraction_speed", 10)
     ace_config["toolhead_retraction_length"] = config.getint("toolhead_retraction_length", 40)
     ace_config["toolhead_full_purge_length"] = config.getint("toolhead_full_purge_length", 22)

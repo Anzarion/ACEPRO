@@ -62,6 +62,7 @@ class TestFeedRetryLogic(unittest.TestCase):
             'rfid_temp_mode': 'average',
             'rdm_overshoot_length': 50.0,
             'flush_overshoot_length': 50.0,
+            'flush_forward_speed': 6.0,
         }
 
     def _mock_lookup_object(self, name, default=None):
@@ -209,6 +210,7 @@ class TestRetractRetryLogic(unittest.TestCase):
             'rfid_temp_mode': 'average',
             'rdm_overshoot_length': 50.0,
             'flush_overshoot_length': 50.0,
+            'flush_forward_speed': 6.0,
         }
 
     def _mock_lookup_object(self, name, default=None):
