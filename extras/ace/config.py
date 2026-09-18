@@ -167,8 +167,9 @@ def read_ace_config(config):
     # reports absent a stub of the old filament is still sitting in the gears.
     # Left there, the gears keep gripping the stub and the next load butts
     # against it instead of being driven in.  Must therefore exceed the
-    # sensor-to-gears distance; sensor-to-nozzle is the safe choice.
-    ace_config["flush_overshoot_length"] = config.getfloat("flush_overshoot_length", 10.0)
+    # sensor-to-gears distance, which this machine measures at 15mm - hence
+    # the default of 20, five past the gears.
+    ace_config["flush_overshoot_length"] = config.getfloat("flush_overshoot_length", 20.0)
     # Extruder speed (mm/s of filament) the depleted-spool flush holds for the
     # whole purge.  6 mm/s of 1.75 mm stock is 14.4 mm3/s.  Raise it only as
     # far as the extruder can push the whole strand through the bowden - the

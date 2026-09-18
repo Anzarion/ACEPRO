@@ -798,9 +798,9 @@ class TestFlushForwardMethod:
 
         assert result is True
         # Both lookups fail, so both take their fallback: a 3000mm cap and a
-        # 10mm overshoot.  One chunk clears the sensor, then the overshoot.
+        # 20mm overshoot.  One chunk clears the sensor, then the overshoot.
         moves = [c[0][0] for c in manager._extruder_move.call_args_list]
-        assert moves == [50.0, 10.0]
+        assert moves == [50.0, 20.0]
 
     def test_flush_holds_target_when_hot_but_heater_off(self, mock_manager_flush):
         """Regression: nozzle still hot but target already 0 (PRINT_END did

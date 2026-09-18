@@ -1250,7 +1250,7 @@ class AceManager:
             overshoot_mm = float(self._get_config_for_tool(
                 tool_index, "flush_overshoot_length"))
         except Exception:
-            overshoot_mm = 10.0
+            overshoot_mm = 20.0
 
         self.gcode.respond_info(
             f"ACE: Flushing orphaned filament forward for T{tool_index} "
