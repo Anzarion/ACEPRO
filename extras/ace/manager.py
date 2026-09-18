@@ -1148,6 +1148,12 @@ class AceManager:
         empty slot plus a blocked path can only mean orphaned filament.
         It therefore also covers a mid-print toolchange, not just print end.
 
+        On success the depletion marker is cleared: the orphaned tail is gone,
+        and by the time print end reads that marker this tool has been replaced
+        by a freshly loaded - and full - spool.  Flushing *that* forward would
+        never terminate on the sensor (the ACE keeps feeding) and would run the
+        whole safety cap out through the nozzle.
+
         Args:
             tool_index: Tool whose unload left the path blocked.
             instance: Owning AceInstance.
@@ -1170,15 +1176,26 @@ class AceManager:
             f"be retracted (nothing left for the gears to grip). Flushing the "
             f"orphaned filament forward through the nozzle."
         )
-        return self.flush_forward_until_clear(tool_index)
+        flushed = self.flush_forward_until_clear(tool_index)
+        if flushed:
+            # Same reasoning as the reset at confirmed runout in RunoutMonitor:
+            # nothing is orphaned any more, so print end must not flush again.
+            self.runout_monitor._empty_spool_detected = False
+        return flushed
 
     def flush_forward_until_clear(self, tool_index):
         """Purge orphaned filament forward until the toolhead sensor clears.
 
-        Called at print end when the spool emptied during printing but the
-        print finished before the toolhead sensor triggered runout.  The ACE
-        has nothing to grip, so normal retraction cannot work.  Instead we
-        push the remaining filament out through the nozzle over the bucket.
+        Reached from two directions: a mid-print toolchange whose unload found
+        the path blocked, and print end when the spool emptied during printing
+        but the print finished before the toolhead sensor triggered runout.
+        Either way the ACE has nothing to grip, so normal retraction cannot
+        work - the filament goes out through the nozzle over the bucket.
+
+        The loop stops on the toolhead sensor, which sits *before* the
+        extruder, so a stub is still in the gears at that point.  A configured
+        overshoot pushes it the rest of the way out; without it the gears keep
+        holding the old filament and the next load butts against its end.
 
         Args:
             tool_index: Tool whose spool was depleted.
@@ -1200,6 +1217,17 @@ class AceManager:
                 tool_index, "total_max_feeding_length"))
         except Exception:
             max_flush_mm = 3000.0
+
+        # The toolhead sensor sits *before* the extruder, so the moment it
+        # reports absent there is still a stub of the old filament in the
+        # gears.  Leave it and the gears keep gripping the stub while the
+        # incoming filament butts against its end, never getting driven in.
+        # Push it the rest of the way out before handing back.
+        try:
+            overshoot_mm = float(self._get_config_for_tool(
+                tool_index, "flush_overshoot_length"))
+        except Exception:
+            overshoot_mm = 10.0
 
         self.gcode.respond_info(
             f"ACE: Flushing orphaned filament forward for T{tool_index} "
@@ -1247,6 +1275,7 @@ class AceManager:
 
         # --- Flush in chunks, checking sensor after each ---
         total_flushed = 0.0
+        overshot = 0.0
         cleared = False
 
         try:
@@ -1262,6 +1291,21 @@ class AceManager:
                 # Safety cap reached without a break - the sensor may still
                 # have cleared on the very last chunk.
                 cleared = not self.get_switch_state(SENSOR_TOOLHEAD)
+
+            # --- Overshoot past the extruder gears (success path only) ---
+            if cleared:
+                self.gcode.respond_info(
+                    f"ACE: Toolhead sensor clear after {total_flushed:.0f}mm"
+                )
+                if overshoot_mm > 0:
+                    self.gcode.respond_info(
+                        f"ACE: Pushing {overshoot_mm:.0f}mm further so the tail "
+                        f"leaves the extruder gears - otherwise the next load "
+                        f"butts against it instead of being gripped"
+                    )
+                    self._extruder_move(
+                        overshoot_mm, FLUSH_SPEED_MMS, wait_for_move_end=True)
+                    overshot = overshoot_mm
         except Exception:
             # Never leave a hot nozzle parked over the bucket on an aborted
             # flush (e.g. cold-extrude abort, emergency stop).
@@ -1288,10 +1332,6 @@ class AceManager:
             self._turn_off_heater_if_idle()
             return False
 
-        self.gcode.respond_info(
-            f"ACE: Toolhead sensor clear after {total_flushed:.0f}mm"
-        )
-
         # --- Cleanup (success path only: wipe while still hot, then cool) ---
         self.gcode.run_script_from_command("NOZZLE_CLEAN")
         self.gcode.run_script_from_command("TO_THROW_POSITION")
@@ -1299,7 +1339,9 @@ class AceManager:
 
         self.state.set("ace_filament_pos", FILAMENT_STATE_BOWDEN)
         self.gcode.respond_info(
-            f"ACE: Flush forward complete — {total_flushed:.0f}mm purged"
+            f"ACE: Flush forward complete — {total_flushed + overshot:.0f}mm "
+            f"purged ({total_flushed:.0f}mm to sensor clear, "
+            f"{overshot:.0f}mm overshoot)"
         )
         return True
 

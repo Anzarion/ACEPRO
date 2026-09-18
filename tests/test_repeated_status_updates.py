@@ -48,6 +48,7 @@ class TestRepeatedStatusUpdates(unittest.TestCase):
             'pre_cut_retract_length': 50,
             'assist_motor_active_time': 2.0,
             'rdm_overshoot_length': 50.0,
+            'flush_overshoot_length': 50.0,
         }
 
     @patch('ace.instance.AceSerialManager')

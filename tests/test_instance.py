@@ -73,6 +73,7 @@ class TestAceInstance(unittest.TestCase):
             'rfid_inventory_sync_enabled': True,
             'status_debug_logging': True,
             'rdm_overshoot_length': 50.0,
+            'flush_overshoot_length': 50.0,
         }
 
     def _mock_lookup_object(self, name, default=None):
@@ -403,6 +404,7 @@ class TestRegisterToolMacros(unittest.TestCase):
             'rfid_inventory_sync_enabled': True,
             'status_debug_logging': True,
             'rdm_overshoot_length': 50.0,
+            'flush_overshoot_length': 50.0,
         }
 
     @patch('ace.instance.AceSerialManager')
@@ -475,6 +477,7 @@ class TestWaitReady(unittest.TestCase):
             'rfid_inventory_sync_enabled': True,
             'status_debug_logging': True,
             'rdm_overshoot_length': 50.0,
+            'flush_overshoot_length': 50.0,
         }
 
     @patch('ace.instance.AceSerialManager')
@@ -581,6 +584,7 @@ class TestIsSlotEmpty(unittest.TestCase):
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
+            'flush_overshoot_length': 50.0,
         }
 
     @patch('ace.instance.AceSerialManager')
@@ -645,6 +649,7 @@ class TestRetract(unittest.TestCase):
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
+            'flush_overshoot_length': 50.0,
         }
 
     def _time_generator(self, start=0.0, step=0.5):
@@ -804,6 +809,7 @@ class TestFeedFilamentIntoToolheadPreconditions(unittest.TestCase):
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
+            'flush_overshoot_length': 50.0,
         }
 
     @patch('ace.instance.AceSerialManager')
@@ -988,6 +994,7 @@ class TestFeedAndStopHelpers(unittest.TestCase):
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
+            'flush_overshoot_length': 50.0,
         }
 
     @patch('ace.instance.AceSerialManager')
@@ -1154,6 +1161,7 @@ class TestFeedAssist(unittest.TestCase):
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
+            'flush_overshoot_length': 50.0,
         }
 
     def _mock_lookup_object(self, name, default=None):
@@ -1488,6 +1496,7 @@ class TestInventoryManagement(unittest.TestCase):
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
+            'flush_overshoot_length': 50.0,
         }
 
     def _mock_lookup_object(self, name, default=None):
@@ -1570,6 +1579,7 @@ class TestStatusCallbacks(unittest.TestCase):
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
+            'flush_overshoot_length': 50.0,
         }
 
     def _mock_lookup_object(self, name, default=None):
@@ -2356,6 +2366,7 @@ class TestFeedRetractOperations(unittest.TestCase):
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
+            'flush_overshoot_length': 50.0,
         }
 
     @patch('ace.instance.AceSerialManager')
@@ -2461,6 +2472,7 @@ class TestHeartbeat(unittest.TestCase):
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
+            'flush_overshoot_length': 50.0,
         }
 
     @patch('ace.instance.AceSerialManager')
@@ -2519,6 +2531,7 @@ class TestFeedFilamentIntoToolhead(unittest.TestCase):
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
+            'flush_overshoot_length': 50.0,
         }
 
     @patch('ace.instance.AceSerialManager')
@@ -2724,6 +2737,7 @@ class TestSmartUnloadSlotManagerDependency(unittest.TestCase):
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
+            'flush_overshoot_length': 50.0,
         }
 
     @patch('ace.instance.AceSerialManager')
@@ -2793,6 +2807,7 @@ class TestStatusUpdateCallback(unittest.TestCase):
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
+            'flush_overshoot_length': 50.0,
         }
 
     @patch('ace.instance.AceSerialManager')
@@ -2998,6 +3013,7 @@ class TestWaitForCondition(unittest.TestCase):
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
+            'flush_overshoot_length': 50.0,
         }
 
     @patch('ace.instance.AceSerialManager')
@@ -3069,6 +3085,7 @@ class TestManagerProperty(unittest.TestCase):
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
+            'flush_overshoot_length': 50.0,
         }
 
     def _mock_lookup_object(self, name, default=None):
@@ -3152,6 +3169,7 @@ class TestSensorTriggerMonitor(unittest.TestCase):
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
+            'flush_overshoot_length': 50.0,
         }
 
     def tearDown(self):
@@ -3293,6 +3311,7 @@ class TestGetStatus(unittest.TestCase):
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
+            'flush_overshoot_length': 50.0,
         }
 
     def _mock_lookup_object(self, name, default=None):
@@ -3376,6 +3395,7 @@ class TestInventoryJsonEmission(unittest.TestCase):
             'rfid_temp_mode': 'average',
             'status_debug_logging': True,
             'rdm_overshoot_length': 50.0,
+            'flush_overshoot_length': 50.0,
         }
     
     def _mock_lookup_object(self, name, default=None):
@@ -3528,6 +3548,7 @@ class TestFeedFilamentToVerificationSensor(unittest.TestCase):
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
+            'flush_overshoot_length': 50.0,
         }
 
         INSTANCE_MANAGERS.clear()
@@ -3689,6 +3710,7 @@ class TestExtruderMove(unittest.TestCase):
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
+            'flush_overshoot_length': 50.0,
         }
 
     def _mock_lookup_object(self, name, default=None):
@@ -3776,6 +3798,7 @@ class TestSmartUnloadSlot(unittest.TestCase):
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
+            'flush_overshoot_length': 50.0,
         }
 
     def _lookup(self, name, default=None):
@@ -3980,6 +4003,7 @@ class TestRmdTriggeredUnloadSlot(unittest.TestCase):
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
+            'flush_overshoot_length': 50.0,
         }
 
     def _time_generator(self, start=0.0, step=0.5):
@@ -4099,6 +4123,7 @@ class TestFeedFilamentWithWaitForResponse(unittest.TestCase):
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
+            'flush_overshoot_length': 50.0,
         }
 
     def _time_generator(self, start=0.0, step=1.0):
@@ -4204,6 +4229,7 @@ class TestFeedToToolheadWithExtruderAssist(unittest.TestCase):
             'toolhead_full_purge_length': 100,
             'rfid_inventory_sync_enabled': True,
             'rdm_overshoot_length': 50.0,
+            'flush_overshoot_length': 50.0,
         }
 
     def _time_generator(self, start=0.0, step=0.2):

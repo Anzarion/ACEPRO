@@ -146,6 +146,13 @@ def read_ace_config(config):
     # Extra retraction (mm) after the RDM sensor clears during unload (safety
     # margin past the splitter exit). Only used when an RDM sensor is present.
     ace_config["rdm_overshoot_length"] = config.getfloat("rdm_overshoot_length", 50.0)
+    # Extra forward feed (mm) after the toolhead sensor clears during a
+    # depleted-spool flush.  That sensor sits *before* the extruder, so when it
+    # reports absent a stub of the old filament is still sitting in the gears.
+    # Left there, the gears keep gripping the stub and the next load butts
+    # against it instead of being driven in.  Must therefore exceed the
+    # sensor-to-gears distance; sensor-to-nozzle is the safe choice.
+    ace_config["flush_overshoot_length"] = config.getfloat("flush_overshoot_length", 10.0)
     ace_config["toolhead_retraction_speed"] = config.getint("toolhead_retraction_speed", 10)
     ace_config["toolhead_retraction_length"] = config.getint("toolhead_retraction_length", 40)
     ace_config["toolhead_full_purge_length"] = config.getint("toolhead_full_purge_length", 22)

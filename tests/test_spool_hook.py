@@ -13,6 +13,7 @@ These tests verify that:
 """
 
 import pytest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch, call
 
 
@@ -530,10 +531,26 @@ class TestFlushForwardMethod:
         # Sensor: toolhead starts triggered, clears after some extrusion
         manager.get_switch_state = MagicMock(return_value=True)
 
-        # The flush derives its safety cap from total_max_feeding_length.
-        # A bare MagicMock would answer float() with 1.0 and cap the flush at
-        # a single millimetre, so give it the machine's real value.
-        manager._get_config_for_tool = MagicMock(return_value=3000.0)
+        # The flush reads two lengths from config: the safety cap and the
+        # overshoot past the extruder gears.  A bare MagicMock would answer
+        # float() with 1.0 and cap the flush at a single millimetre; a single
+        # return_value would make the overshoot 3000mm.  So answer per
+        # parameter, and refuse anything unexpected so a renamed key shows up
+        # as a failure instead of silently taking the fallback.
+        # 65.0 deliberately differs from FLUSH_CHUNK_MM (50.0), so the
+        # assertions below can tell a chunk from the overshoot.
+        _config_values = {
+            "total_max_feeding_length": 3000.0,
+            "flush_overshoot_length": 65.0,
+        }
+
+        def _config(tool_index, param_name):
+            if param_name not in _config_values:
+                raise AssertionError(
+                    f"unexpected config lookup: {param_name}")
+            return _config_values[param_name]
+
+        manager._get_config_for_tool = MagicMock(side_effect=_config)
 
         # _extruder_move is the workhorse — no-op in test
         manager._extruder_move = MagicMock()
@@ -554,10 +571,9 @@ class TestFlushForwardMethod:
         result = AceManager.flush_forward_until_clear(manager, tool_index=3)
 
         assert result is True
-        # One chunk extruded (50mm), then sensor cleared
-        manager._extruder_move.assert_called_once()
-        args = manager._extruder_move.call_args
-        assert args[0][0] == 50.0  # chunk size
+        # One 50mm chunk, then the sensor cleared and the overshoot followed.
+        moves = [c[0][0] for c in manager._extruder_move.call_args_list]
+        assert moves == [50.0, 65.0]
 
     def test_flush_multiple_chunks(self, mock_manager_flush):
         """Flush should extrude multiple chunks until sensor clears."""
@@ -570,7 +586,8 @@ class TestFlushForwardMethod:
         result = AceManager.flush_forward_until_clear(manager, tool_index=3)
 
         assert result is True
-        assert manager._extruder_move.call_count == 3
+        moves = [c[0][0] for c in manager._extruder_move.call_args_list]
+        assert moves == [50.0, 50.0, 50.0, 65.0]
 
     def test_flush_fails_at_max_distance(self, mock_manager_flush):
         """If sensor never clears within MAX_FLUSH_MM, return False."""
@@ -583,9 +600,19 @@ class TestFlushForwardMethod:
         result = AceManager.flush_forward_until_clear(manager, tool_index=3)
 
         assert result is False
+        # No overshoot on the failure path: the tail never left the sensor,
+        # so there is nothing sitting in the gears to push clear.
+        moves = [c[0][0] for c in manager._extruder_move.call_args_list]
+        assert 65.0 not in moves
 
     def test_flush_immediate_clear(self, mock_manager_flush):
-        """If sensor is already clear at start, no extrusion needed."""
+        """Sensor already clear: no chunks, but still clear the gears.
+
+        The flush is only entered on a blocked path, and the toolhead sensor
+        is only one of the two that can report that block - the RDM is the
+        other.  So a tail can sit in the gears even when this sensor reads
+        absent, and the overshoot still has to run.
+        """
         manager = mock_manager_flush
 
         # Sensor already clear
@@ -595,7 +622,61 @@ class TestFlushForwardMethod:
         result = AceManager.flush_forward_until_clear(manager, tool_index=3)
 
         assert result is True
-        manager._extruder_move.assert_not_called()
+        moves = [c[0][0] for c in manager._extruder_move.call_args_list]
+        assert moves == [65.0]
+
+    def test_overshoot_length_comes_from_config(self, mock_manager_flush):
+        """The overshoot must be configurable, not a constant in the loop."""
+        manager = mock_manager_flush
+        manager._get_config_for_tool = MagicMock(side_effect=lambda t, p: {
+            "total_max_feeding_length": 3000.0,
+            "flush_overshoot_length": 90.0,
+        }[p])
+        manager.get_switch_state.side_effect = [True, False]
+
+        from extras.ace.manager import AceManager
+        assert AceManager.flush_forward_until_clear(manager, tool_index=3) is True
+
+        moves = [c[0][0] for c in manager._extruder_move.call_args_list]
+        assert moves == [50.0, 90.0]
+
+    def test_overshoot_can_be_switched_off(self, mock_manager_flush):
+        """flush_overshoot_length = 0 must mean "no extra move"."""
+        manager = mock_manager_flush
+        manager._get_config_for_tool = MagicMock(side_effect=lambda t, p: {
+            "total_max_feeding_length": 3000.0,
+            "flush_overshoot_length": 0.0,
+        }[p])
+        manager.get_switch_state.side_effect = [True, False]
+
+        from extras.ace.manager import AceManager
+        assert AceManager.flush_forward_until_clear(manager, tool_index=3) is True
+
+        moves = [c[0][0] for c in manager._extruder_move.call_args_list]
+        assert moves == [50.0]
+
+    def test_overshoot_runs_before_the_heater_is_released(self, mock_manager_flush):
+        """Ordering matters: the overshoot is an extrusion.
+
+        _turn_off_heater_if_idle() drops the target, and the nozzle coasts
+        below min_extrude_temp within seconds.  An overshoot placed after it
+        would abort as a cold extrude with the tail still in the gears - the
+        exact state this move exists to prevent.
+        """
+        manager = mock_manager_flush
+        order = []
+        manager._extruder_move.side_effect = (
+            lambda dist, *a, **k: order.append(("move", dist)))
+        manager._turn_off_heater_if_idle.side_effect = (
+            lambda *a, **k: order.append(("heater-off", None)))
+        manager.get_switch_state.side_effect = [True, False]
+
+        from extras.ace.manager import AceManager
+        assert AceManager.flush_forward_until_clear(manager, tool_index=3) is True
+
+        assert ("move", 65.0) in order
+        assert ("heater-off", None) in order
+        assert order.index(("move", 65.0)) < order.index(("heater-off", None))
 
     def test_flush_heats_when_cold(self, mock_manager_flush):
         """When nozzle is below min_extrude_temp, M109 must be called."""
@@ -668,17 +749,20 @@ class TestFlushForwardMethod:
         """The safety cap must track total_max_feeding_length, not a constant
         that silently stops matching the bowden when the tube is changed."""
         manager = mock_manager_flush
-        manager._get_config_for_tool.return_value = 500.0
+        manager._get_config_for_tool = MagicMock(side_effect=lambda t, p: {
+            "total_max_feeding_length": 500.0,
+            "flush_overshoot_length": 65.0,
+        }[p])
         manager.get_switch_state.return_value = True  # never clears
 
         from extras.ace.manager import AceManager
         result = AceManager.flush_forward_until_clear(manager, tool_index=3)
 
         assert result is False
-        manager._get_config_for_tool.assert_called_with(
+        manager._get_config_for_tool.assert_any_call(
             3, "total_max_feeding_length"
         )
-        # 500 mm cap in 50 mm chunks
+        # 500 mm cap in 50 mm chunks, and no overshoot - it never cleared
         assert manager._extruder_move.call_count == 10
         total = sum(c.args[0] for c in manager._extruder_move.call_args_list)
         assert total == 500.0
@@ -693,7 +777,10 @@ class TestFlushForwardMethod:
         result = AceManager.flush_forward_until_clear(manager, tool_index=3)
 
         assert result is True
-        manager._extruder_move.assert_called_once()
+        # Both lookups fail, so both take their fallback: a 3000mm cap and a
+        # 10mm overshoot.  One chunk clears the sensor, then the overshoot.
+        moves = [c[0][0] for c in manager._extruder_move.call_args_list]
+        assert moves == [50.0, 10.0]
 
     def test_flush_holds_target_when_hot_but_heater_off(self, mock_manager_flush):
         """Regression: nozzle still hot but target already 0 (PRINT_END did
@@ -858,6 +945,10 @@ class TestFlushFallbackOnBlockedPath:
         manager = MagicMock(spec=AceManager)
         manager.gcode = MagicMock()
         manager.flush_forward_until_clear = MagicMock(return_value=flush_result)
+        # A real attribute holder, not a MagicMock child: any attribute of a
+        # MagicMock reads as truthy no matter what was stored in it, which
+        # would make "the marker was cleared" impossible to assert.
+        manager.runout_monitor = SimpleNamespace(_empty_spool_detected=True)
         instance = MagicMock()
         instance._is_slot_empty.return_value = slot_empty
         return manager, instance
@@ -896,3 +987,35 @@ class TestFlushFallbackOnBlockedPath:
 
         assert AceManager._flush_if_spool_ran_out(manager, 3, instance, 3) is False
         manager.flush_forward_until_clear.assert_not_called()
+
+    def test_clears_depletion_marker_after_successful_flush(self):
+        """The marker means "an orphaned tail is waiting for print end".
+
+        Mid-print the flush removes that tail, and the toolchange right after
+        it loads a *full* spool.  A marker that survived would send print end
+        into flush_forward_until_clear() against that full spool, where the
+        toolhead sensor never clears - the ACE keeps feeding - so the loop
+        would run the whole safety cap (3000mm) out through the nozzle and
+        then report failure, leaving ace_current_index stale.
+        """
+        from extras.ace.manager import AceManager
+        manager, instance = self._manager(slot_empty=True)
+
+        assert AceManager._flush_if_spool_ran_out(manager, 3, instance, 3) is True
+        assert manager.runout_monitor._empty_spool_detected is False
+
+    def test_keeps_depletion_marker_when_flush_fails(self):
+        """A failed flush leaves the tail in place - print end must still know."""
+        from extras.ace.manager import AceManager
+        manager, instance = self._manager(slot_empty=True, flush_result=False)
+
+        assert AceManager._flush_if_spool_ran_out(manager, 3, instance, 3) is False
+        assert manager.runout_monitor._empty_spool_detected is True
+
+    def test_keeps_depletion_marker_when_slot_still_loaded(self):
+        """A real jam clears nothing: no flush ran, so nothing was resolved."""
+        from extras.ace.manager import AceManager
+        manager, instance = self._manager(slot_empty=False)
+
+        assert AceManager._flush_if_spool_ran_out(manager, 3, instance, 3) is False
+        assert manager.runout_monitor._empty_spool_detected is True

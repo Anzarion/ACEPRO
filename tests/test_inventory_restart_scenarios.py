@@ -81,6 +81,7 @@ class TestInventoryRestartScenarios:
             "rfid_inventory_sync_enabled": True,
             "feed_assist_active_after_ace_connect": False,
             "rdm_overshoot_length": 50.0,
+            "flush_overshoot_length": 50.0,
         }
 
     def test_fresh_start_no_saved_data(self, mock_printer, mock_ace_config):
