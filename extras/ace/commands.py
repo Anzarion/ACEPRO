@@ -12,6 +12,7 @@ import logging
 from .config import (
     ACE_INSTANCES,
     INSTANCE_MANAGERS,
+    EmptySlotError,
     SENSOR_TOOLHEAD,
     SENSOR_RDM,
     FILAMENT_STATE_BOWDEN,
@@ -1529,7 +1530,19 @@ def cmd_ACE_CHANGE_TOOL(manager, gcmd, tool_index):
         except Exception:
             filament_pos = None
 
-        if is_printing and not is_startup:
+        if isinstance(e, EmptySlotError):
+            # Nothing moved: the guard rejected the target before the load.
+            # Whatever was loaded before is still in the path, so recording the
+            # requested tool here would make the state contradict the physical
+            # machine - and everything downstream trusts that state.  Keep what
+            # we had; if the unload already ran, perform_tool_change set it to
+            # -1 itself.
+            active_tool = manager.state.get("ace_current_index", -1)
+            gcode.respond_info(
+                f"ACE: T{tool_index} slot is empty - nothing was moved, "
+                f"current tool stays T{active_tool}"
+            )
+        elif is_printing and not is_startup:
             active_tool = tool_index
         else:
             # Idle/startup failure. Decide which tool is physically in the path.

@@ -2,6 +2,7 @@ from .config import (
     ACE_INSTANCES,
     INSTANCE_MANAGERS,
     SLOTS_PER_ACE,
+    EmptySlotError,
     SENSOR_TOOLHEAD,
     SENSOR_RDM,
     FILAMENT_STATE_SPLITTER,
@@ -1295,15 +1296,43 @@ class AceManager:
             )
             self.gcode.run_script_from_command(f"M109 S{heat_temp:.0f}")
 
+        # Abort criterion for "somebody is still feeding this path".
+        #
+        # The whole premise of the flush is that the filament in the path is
+        # orphaned - its slot is empty, so the strand is finite.  If it is
+        # actually coming from another, still loaded slot, the toolhead sensor
+        # never clears and the loop runs the full safety cap out through the
+        # nozzle.  That is exactly what happened on 2026-09-18.
+        #
+        # The RDM sensor settles it, because it sits upstream of the toolhead:
+        # an orphaned strand frees it partway through (measured the same day:
+        # RDM clear after ~723mm, toolhead after 1750mm), while a strand being
+        # fed keeps it triggered forever.  The worst case for a genuinely
+        # orphaned strand is one spanning the whole park-to-RDM distance, so
+        # that length plus 50% margin is a safe threshold.
+        rdm_guard_mm = 0.0
+        if self.has_rdm_sensor():
+            try:
+                rdm_guard_mm = 1.5 * float(self._get_config_for_tool(
+                    tool_index, "parkposition_to_rdm_length"))
+            except Exception:
+                rdm_guard_mm = 0.0
+
         # --- Flush in chunks, checking sensor after each ---
         total_flushed = 0.0
         overshot = 0.0
         cleared = False
+        still_fed = False
 
         try:
             while total_flushed < max_flush_mm:
                 if not self.get_switch_state(SENSOR_TOOLHEAD):
                     cleared = True
+                    break
+
+                if (rdm_guard_mm and total_flushed > rdm_guard_mm
+                        and self.get_switch_state(SENSOR_RDM)):
+                    still_fed = True
                     break
 
                 chunk = min(FLUSH_CHUNK_MM, max_flush_mm - total_flushed)
@@ -1345,6 +1374,17 @@ class AceManager:
                 pass
             self.gcode.run_script_from_command(
                 "RESTORE_GCODE_STATE NAME=ACE_FLUSH_FORWARD MOVE=0")
+
+        if still_fed:
+            self.gcode.respond_info(
+                f"ACE: ABORTED after {total_flushed:.0f}mm — the RDM sensor is "
+                f"still triggered, so filament is being SUPPLIED, not orphaned. "
+                f"Another slot is feeding this path, or the recorded tool does "
+                f"not match what is physically loaded. Check ace_current_index "
+                f"against the slots before retrying."
+            )
+            self._turn_off_heater_if_idle()
+            return False
 
         if not cleared:
             self.gcode.respond_info(
@@ -2369,7 +2409,7 @@ class AceManager:
 
         if live_empty or inv_empty:
             source = "device" if live_empty else "inventory"
-            raise ValueError(
+            raise EmptySlotError(
                 f"ACE[{instance.instance_num}] slot {slot} (T{tool_index}) is "
                 f"EMPTY ({source}-reported) - insert a spool and retry. "
                 f"Aborted before any filament movement - the previously "
@@ -2389,11 +2429,16 @@ class AceManager:
         status = None
         gcode_move = self.printer.lookup_object("gcode_move")
 
-        # Empty-slot guard (defense in depth - the command layer checks before
-        # homing already; this covers endless spool and direct callers).
-        # Raising here routes into the callers' existing failure handling:
-        # pause+prompt mid-print, abort at startup.
-        self.ensure_tool_slot_loaded(target_tool)
+        # Empty-slot guard, but only this early when there is nothing to
+        # unload.  Aborting before the unload leaves the OLD filament in the
+        # path and the print paused in a state that no obvious operator action
+        # resolves: "insert filament and Resume" then loads into an occupied
+        # path.  That happened on 2026-09-18 and ended with a full spool pushed
+        # through the nozzle.  With a tool loaded the check is deferred to just
+        # before the load, so the pause happens with a free path - where
+        # inserting a spool and resuming is exactly the right move.
+        if current_tool == -1:
+            self.ensure_tool_slot_loaded(target_tool)
 
         toolhead_sensor = self.get_switch_state(SENSOR_TOOLHEAD)
         rdm_sensor = self.get_switch_state(SENSOR_RDM) if self.has_rdm_sensor() else False
@@ -2599,6 +2644,10 @@ class AceManager:
                     if not success:
                         raise Exception(f"Failed to unload tool {current_tool}")
                     self.gcode.respond_info(f"ACE: Tool {current_tool} unloaded successfully")
+                    # Record it now, not only after a successful load: if the
+                    # deferred empty-slot guard rejects the target below, the
+                    # state must say "nothing loaded" - which is the truth.
+                    self.state.set("ace_current_index", -1)
 
             elif filament_pos == FILAMENT_STATE_BOWDEN:
                 self.gcode.respond_info(
@@ -2612,6 +2661,7 @@ class AceManager:
                     success = self.smart_unload(tool_index=current_tool, keep_heater=True)
                     if not success:
                         raise Exception(f"Failed to unload tool {current_tool}")
+                    self.state.set("ace_current_index", -1)
                 else:
                     self.gcode.respond_info("ACE: No filament at toolhead, correcting state to bowden (unloaded)")
                     self.state.set("ace_filament_pos", FILAMENT_STATE_BOWDEN)
@@ -2626,6 +2676,11 @@ class AceManager:
 
         # ===== LOAD NEW TOOL =====
         if target_tool != -1:
+            # Deferred empty-slot guard (see the note at the top).  By now the
+            # old tool is out and the path is free, so a rejection here pauses
+            # in a state the operator can act on.
+            self.ensure_tool_slot_loaded(target_tool)
+
             if not self.check_and_wait_for_spool_ready(target_tool):
                 raise Exception(f"Tool {target_tool} is not ready. Please check the spool and try again.")
 

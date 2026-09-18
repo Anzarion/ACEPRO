@@ -26,6 +26,22 @@ SENSOR_RDM = 'return_module'
 # Slots per ACE unit (fixed)
 SLOTS_PER_ACE = 4
 
+
+class EmptySlotError(ValueError):
+    """Target slot reports empty - raised BEFORE any filament moved.
+
+    A ValueError subclass so existing handlers keep catching it, but its own
+    type so a caller can tell "nothing happened yet" from "the attempt failed
+    partway".  That difference decides what the recorded tool index must be:
+    after this error the previously loaded tool is still the one in the path,
+    and writing the requested tool instead makes the state lie about which
+    filament is physically loaded.
+
+    On 2026-09-18 that lie cost a full spool: the state claimed T0 while T1 sat
+    in the bowden, a later unload emptied slot 0, and the depleted-spool flush
+    concluded the T1 strand was orphaned and pushed it through the nozzle.
+    """
+
 # Retry configuration for unload/load operations
 UNLOAD_RETRY_ATTEMPTS = 3              # Number of retry attempts
 UNLOAD_RETRY_DELAY = 0.5               # Seconds between attempts
