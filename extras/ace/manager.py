@@ -933,6 +933,18 @@ class AceManager:
 
             # Check if slot is empty BEFORE attempting unload
             if slot_status == "empty":
+                # An empty slot and a path that is still blocked is the exact
+                # signature of a spool that ran out AT the ACE: the tail left
+                # the feed gears, so nothing can retract it, but the extruder
+                # can still push it out through the nozzle.  This guard has to
+                # offer that way out, because it stands in front of every other
+                # one - the blocked-path fallbacks further down are ~100 lines
+                # away and were unreachable whenever the slot read empty, which
+                # is precisely when they were meant to fire.
+                if not self.is_filament_path_free_instant():
+                    if self._flush_if_spool_ran_out(
+                            tool_index, instance, local_slot):
+                        return True
                 raise Exception(
                     f"Cannot unload T{tool_index} - ACE slot {local_slot} is EMPTY.\n"
                 )

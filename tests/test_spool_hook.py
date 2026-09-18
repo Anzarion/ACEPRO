@@ -1019,3 +1019,84 @@ class TestFlushFallbackOnBlockedPath:
 
         assert AceManager._flush_if_spool_ran_out(manager, 3, instance, 3) is False
         assert manager.runout_monitor._empty_spool_detected is True
+
+
+class TestSmartUnloadReachesTheFlush:
+    """Reachability, not behaviour: does smart_unload ever get there?
+
+    The flush fallbacks live at the blocked-path exits deep inside
+    smart_unload, but an empty-slot guard near the top of CASE 1 raised
+    before them - on exactly the condition the flush exists for.  Calling
+    _flush_if_spool_ran_out() directly, as the tests above do, proves the
+    function works and says nothing about whether anything calls it.  On
+    2026-09-18 the machine settled that: a mid-print toolchange onto a
+    depleted spool ended in "Cannot unload T0 - ACE slot 0 is EMPTY" and
+    the print paused.  These tests enter through smart_unload().
+    """
+
+    @pytest.fixture(autouse=True)
+    def _register_instance(self):
+        """get_instance_from_tool() resolves through the module registry."""
+        from extras.ace import config as ace_config
+        ace_config.ACE_INSTANCES[0] = MagicMock()
+        try:
+            yield
+        finally:
+            ace_config.ACE_INSTANCES.pop(0, None)
+
+    def _manager(self, slot_status, path_free, flush_result=True):
+        from extras.ace.manager import AceManager
+
+        manager = MagicMock(spec=AceManager)
+        manager.gcode = MagicMock()
+        manager.state = MagicMock()
+        manager.state.get.return_value = 0
+        manager.toolhead_retraction_length = 50.0
+        manager.toolhead_retraction_speed = 15.0
+        manager.is_filament_path_free_instant = MagicMock(return_value=path_free)
+        manager._flush_if_spool_ran_out = MagicMock(return_value=flush_result)
+
+        instance = MagicMock()
+        instance.inventory = [{"status": slot_status}]
+        manager.instances = [instance]
+        return manager, instance
+
+    def test_depleted_spool_is_flushed_instead_of_aborting(self):
+        from extras.ace.manager import AceManager
+        manager, instance = self._manager("empty", path_free=False)
+
+        result = AceManager.smart_unload(manager, tool_index=0)
+
+        assert result is True
+        manager._flush_if_spool_ran_out.assert_called_once_with(0, instance, 0)
+
+    def test_empty_slot_with_clear_path_still_aborts(self):
+        """Nothing is orphaned, so there is nothing to push out - and a 2 m
+        purge on a free path would be pure waste."""
+        from extras.ace.manager import AceManager
+        manager, _ = self._manager("empty", path_free=True)
+
+        with pytest.raises(Exception, match="is EMPTY"):
+            AceManager.smart_unload(manager, tool_index=0)
+        manager._flush_if_spool_ran_out.assert_not_called()
+
+    def test_still_aborts_when_the_flush_declines(self):
+        """_flush_if_spool_ran_out re-checks the device itself; if it says no,
+        the old error is still the right answer."""
+        from extras.ace.manager import AceManager
+        manager, _ = self._manager("empty", path_free=False, flush_result=False)
+
+        with pytest.raises(Exception, match="is EMPTY"):
+            AceManager.smart_unload(manager, tool_index=0)
+
+    def test_loaded_slot_passes_the_guard(self):
+        """A filled slot must not be caught by the guard at all - blocked path
+        or not, that is a real jam for the normal unload machinery to report.
+        Whatever this bare mock does further downstream is not the subject."""
+        from extras.ace.manager import AceManager
+        manager, _ = self._manager("ready", path_free=False)
+
+        try:
+            AceManager.smart_unload(manager, tool_index=0)
+        except Exception as e:
+            assert "is EMPTY" not in str(e)
